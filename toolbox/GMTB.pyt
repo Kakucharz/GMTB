@@ -205,44 +205,53 @@ class GenerujIntersekcje:
                 cell_size = nmt_raster.meanCellWidth
                 rows = nmt_raster.height
                 cols = nmt_raster.width
+                messages.AddMessage(f"Optymalizacja: tworzenie precyzyjnego rastra płaszczyzny...")
 
-                x_coords = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols)
-                y_coords = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows)
-                x_grid, y_grid = np.meshgrid(x_coords, y_coords)
-                y_grid = np.flipud(y_grid)
-                z_grid = z0 - (nx/nz) * (x_grid - x0) - (ny/nz) * (y_grid - y0)
-                points_xyz = np.vstack([x_grid.ravel(), y_grid.ravel(), z_grid.ravel()]).T
+                x_coords_dense = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols)
+                y_coords_dense = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows)
+                x_grid_dense, y_grid_dense = np.meshgrid(x_coords_dense, y_coords_dense)
+                y_grid_dense = np.flipud(y_grid_dense)
+                z_grid_dense = z0 - (nx/nz) * (x_grid_dense - x0) - (ny/nz) * (y_grid_dense - y0)
+                    #points_xyz = np.vstack([x_grid_dense.ravel(), y_grid_dense.ravel(), z_grid_dense.ravel()]).T
 
-                temp_points_for_tin = "in_memory/temp_geologic_points"
-                arcpy.management.CreateFeatureclass("in_memory", "temp_geologic_points", "POINT", spatial_reference=spatial_ref)
+                #Dense raster 
+                geologic_raster_dense = arcpy.NumPyArrayToRaster(z_grid_dense, lower_left, cell_size, cell_size)
+
+                #Creating Intersection Line
+                messages.AddMessage("Znajdowanie precyzyjnej linii intersekcyjnej...")
+                intersection_raster = Con(abs(geologic_raster_dense - nmt_raster) < 1, 1)
+                arcpy.conversion.RasterToPolyline(intersection_raster, output_intersection, "ZERO", 0, "SIMPLIFY")
+                messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
+
+                #Creating TIN layer
+                messages.AddMessage("Tworzenie zoptymalizowanej powierzchni TIN...")
+                density_multiplier = 10
+                rows_sparse = int(rows / density_multiplier)
+                cols_sparse = int(cols / density_multiplier)
+                messages.AddMessage(f"Wizualizacja: tworzenie rzadkiej siatki {cols_sparse}x{rows_sparse} punktów...")
+
+                #Sparse NumPy grid
+                x_coords_sparse = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols_sparse)
+                y_coords_sparse = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows_sparse)
+                x_grid_sparse, y_grid_sparse = np.meshgrid(x_coords_sparse, y_coords_sparse)
+                y_grid_sparse = np.flipud(y_grid_sparse)
+                z_grid_sparse = z0 - (nx/nz) * (x_grid_sparse - x0) - (ny/nz) * (y_grid_sparse - y0)
+                points_xyz_sparse = np.vstack([x_grid_sparse.ravel(), y_grid_sparse.ravel(), z_grid_sparse.ravel()]).T
+
+                temp_points_for_tin = "in_memory/sparse_points"
+                arcpy.management.CreateFeatureclass("in_memory", "sparse_points", "POINT", spatial_reference = spatial_ref)
                 arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
                 with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
-                    for p in points_xyz: cursor.insertRow(((p[0], p[1]), p[2]))
+                    for p in points_xyz_sparse: 
+                        cursor.insertRow(((p[0], p[1]), p[2]))
 
-                # Tworzenie wynikowego TIN
+                #Output TIN layer
                 messages.AddMessage("Tworzenie wynikowej powierzchni TIN...")
                 tin_input_features = f"{temp_points_for_tin} Z_VALUE Mass_Points"
                 arcpy.ddd.CreateTin(output_surface, spatial_ref, tin_input_features)
                 messages.AddMessage(f"Zapisano powierzchnię TIN w: {output_surface}")
                 arcpy.management.Delete(temp_points_for_tin)
 
-                # Znajdowanie Linii Intersekcyjnej
-                messages.AddMessage("Znajdowanie precyzyjnej linii intersekcyjnej...")
-                temp_geologic_raster = "in_memory/g_raster"
-                arcpy.ddd.TinRaster(output_surface, temp_geologic_raster, "FLOAT", "LINEAR", "CELLSIZE")
-                diff_raster = Raster(temp_geologic_raster) - Raster(input_nmt)
-
-                min_val = diff_raster.minimum
-                max_val = diff_raster.maximum
-                if min_val > 0 or max_val < 0:
-                    raise Exception("Nie znaleziono linii intersekcyjnej. Cała płaszczyzna jest nad lub pod terenem.")
-
-                messages.AddMessage("Konwersja strefy na warstwę liniową...")
-                intersection_raster = Con(abs(diff_raster) < 1, 1)
-                arcpy.conversion.RasterToPolyline(intersection_raster, output_intersection, "ZERO", 0, "SIMPLIFY")
-                
-                messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
-                arcpy.management.Delete(temp_geologic_raster)
                 messages.AddMessage("Zakończono pomyślnie!")
             
             except Exception as e:
