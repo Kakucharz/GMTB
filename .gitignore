@@ -1,0 +1,20 @@
+# Ignoruj wszystkie pliki i foldery związane z projektem ArcGIS Pro
+*.aprx
+*.atbx
+*.gdb/
+*.geodatabase/
+.backups/
+ImportLog/
+*.lock
+
+# Ignoruj foldery cache Pythona i VS Code
+__pycache__/
+.vscode/
+
+# Ignoruj pliki tymczasowe i logi
+*.log
+*.tmp
+
+# Ignoruj cały folder z danymi
+data/
+GMTB/
