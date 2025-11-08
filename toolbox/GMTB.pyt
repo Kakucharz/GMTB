@@ -101,9 +101,9 @@ class GenerujIntersekcje:
 
         #Parametr 2: ścieżka do zapisu wynikowego rastra płaszczyzny
         param7 = arcpy.Parameter(
-            displayName="Wynikowy raster płaszczyzny geologicznej",
-            name="out_surface_raster",
-            datatype="DERasterDataset", 
+            displayName="Wynikowy TIN płaszczyzny geologicznej",
+            name="out_surface_tin",
+            datatype="DETin", 
             parameterType="Required",
             direction="Output"
         )
@@ -176,90 +176,94 @@ class GenerujIntersekcje:
             messages.AddMessage("Uruchomiono logikę dla metody: 1 punkt + Dip/Dir")
             
             try:
-                messages.AddMessage(f"Ograniczenie analizy do {horizontal_radius} m")
-                buffer_polygon = "in_memory/analysis_buffer"
-                arcpy.analysis.Buffer(input_points, buffer_polygon, horizontal_radius)
-                arcpy.env.extent = buffer_polygon
-                arcpy.env.mask= buffer_polygon
-
-                #odczytywanie wartości z rastra
+                # Przygotowanie danych
                 temp_points_with_z = "in_memory/anchor_point"
                 messages.AddMessage("Odczytywanie wartości z NMT...")
-                arcpy.sa.ExtractValuesToPoints(input_points, input_nmt, temp_points_with_z, "NONE", "VALUE_ONLY")
+                ExtractValuesToPoints(input_points, input_nmt, temp_points_with_z, "NONE", "VALUE_ONLY")
 
                 with arcpy.da.SearchCursor(temp_points_with_z, ["SHAPE@X", "SHAPE@Y", "RASTERVALU"]) as cursor:
                     row = next(cursor, None)
-                    if row is None:
-                        raise Exception("Warstwa wejściowa nie zawiera punktów!")
+                    if row is None: raise Exception("Warstwa wejściowa nie zawiera punktów!")
                     x0, y0, z0 = row[0], row[1], row[2]
-
-                arcpy.management.Delete(temp_points_with_z) #sprzątanie po sobie :)
+                arcpy.management.Delete(temp_points_with_z)
                 messages.AddMessage(f"Punkt zakotwiczenia: X= {x0}, Y = {y0}, Z = {z0}")
 
-                #przeliczenie kątów na radiany
                 dip_rad = math.radians(dip_degrees)
                 dir_rad = math.radians(dir_degrees)
-
-                #obliczenia płaszczyzny A = nx, B = ny, C = nz
                 nx = math.sin(dip_rad) * math.sin(dir_rad)
                 ny = math.sin(dip_rad) * math.cos(dir_rad)
                 nz = math.cos(dip_rad)
+                if nz == 0: raise Exception("Płaszczyzny pionowe nie są obecnie wspierane.")
 
-                #chwilowa ochrona przed dzieleniem przez 0
-                if nz == 0:
-                    raise Exception("Płaszczyzny pionowe nie są obecnie wspierane w tej metodzie.")
-
-                messages.AddMessage("Generowanie rastra płaszczyzny...")
-
-                nmt_raster = arcpy.Raster(input_nmt)
+                # Generowanie siatki punktów dla TIN
+                messages.AddMessage("Generowanie gęstej siatki punktów dla powierzchni TIN...")
+                nmt_raster = Raster(input_nmt)
                 spatial_ref = nmt_raster.spatialReference
                 arcpy.env.outputCoordinateSystem = spatial_ref
+                arcpy.env.snapRaster = nmt_raster # Ważne dla spójności!!!!
                 lower_left = nmt_raster.extent.lowerLeft
                 cell_size = nmt_raster.meanCellWidth
                 rows = nmt_raster.height
                 cols = nmt_raster.width
-                arcpy.env.snapRaster = nmt_raster
+                messages.AddMessage(f"Optymalizacja: tworzenie precyzyjnego rastra płaszczyzny...")
 
-                #tablice wsółrzędnych w 1D
-                x_coords = np.linspace(
-                    lower_left.X + (cell_size / 2),
-                    lower_left.X + (cell_size / 2) + (cell_size * (cols - 1)),
-                    cols
-                )
-                y_coords = np.linspace(
-                    lower_left.Y + (cell_size / 2),
-                    lower_left.Y + (cell_size / 2) + (cell_size * (rows - 1)),
-                    rows
-                )
+                x_coords_dense = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols)
+                y_coords_dense = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows)
+                x_grid_dense, y_grid_dense = np.meshgrid(x_coords_dense, y_coords_dense)
+                y_grid_dense = np.flipud(y_grid_dense)
+                z_grid_dense = z0 - (nx/nz) * (x_grid_dense - x0) - (ny/nz) * (y_grid_dense - y0)
+                    #points_xyz = np.vstack([x_grid_dense.ravel(), y_grid_dense.ravel(), z_grid_dense.ravel()]).T
 
-                #rozszerzenie z 1D do 2D
-                x_grid, y_grid = np.meshgrid(x_coords, y_coords)
-                #odwrócenie y_grid, bo jest z jakiegoś powodu odwrócony
-                y_grid = np.flipud(y_grid)
+                #Dense raster 
+                geologic_raster_dense = arcpy.NumPyArrayToRaster(z_grid_dense, lower_left, cell_size, cell_size)
 
-                #konwersja z NumPy na ArcPy
-                x_raster = arcpy.NumPyArrayToRaster(x_grid, lower_left, cell_size, cell_size)
-                y_raster = arcpy.NumPyArrayToRaster(y_grid, lower_left, cell_size, cell_size)
+                #Creating Intersection Line
+                messages.AddMessage("Znajdowanie precyzyjnej linii intersekcyjnej...")
+                intersection_raster = Con(abs(geologic_raster_dense - nmt_raster) < 1, 1)
+                thinned_raster = arcpy.sa.Thin(intersection_raster, "ZERO", "NO_FILTER", "ROUND")
+                temp_raw_line = "in_memory/raw_line"
+                arcpy.conversion.RasterToPolyline(thinned_raster, temp_raw_line, "ZERO", 0, "NO_SIMPLIFY")
 
-                messages.AddMessage("Zapisywanie rastra płaszczyzny...")
-                #równanie płaszczyzny: z = z0 - (nx/nz)*(x - x0) - (ny/nz)*(y - y0)
-                geologic_surface = z0 - (nx/nz) * (x_raster - x0) - (ny/nz) * (y_raster - y0)
-
-                messages.AddMessage(f"Przycinanie płaszczyzny do {vertical_distance}m od powierzchni terenu...")
-                nmt_in_buffer = Raster(input_nmt)
-                diff_raster = geologic_surface - nmt_in_buffer
-                clipped_geologic_surface = Con(abs(diff_raster) <= vertical_distance, geologic_surface)
-                clipped_geologic_surface.save(output_surface)
-                messages.AddMessage(f"Zapisano przycięty raster płaszczyzny w: {output_surface}")
-
-                #tworzenie i zapis linii intersekcyjnej
-                messages.AddMessage("Tworzenie linii intersekcyjnej...")
-                intersection_raster = arcpy.sa.Con(abs(arcpy.Raster(input_nmt) - geologic_surface) < 1, 1) #tolerancja 1
-                
-                messages.AddMessage("Konwersja wyniku na warstwę liniową...")
-                arcpy.conversion.RasterToPolyline(intersection_raster, output_intersection, "ZERO", 0, "SIMPLIFY")
+                messages.AddMessage("Wygładzanie linii intersekcyjnej...")
+                    #temp_dissolved_line = "in_memory/dissolved_line"
+                    #arcpy.management.Dissolve(temp_raw_line, temp_dissolved_line)
+                    #simplification_tolerance = cell_size * 2
+                smoothing_tolerance = cell_size * 5 
+                    #arcpy.cartography.SimplifyLine(temp_dissolved_line, output_intersection, "POINT_REMOVE", simplification_tolerance)
+                arcpy.cartography.SmoothLine(temp_raw_line, output_intersection, "PAEK", smoothing_tolerance)
                 messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
-                arcpy.management.Delete(buffer_polygon)
+
+                arcpy.management.Delete(temp_raw_line)
+                    #arcpy.management.Delete(temp_dissolved_line)
+
+                #Creating TIN layer
+                messages.AddMessage("Tworzenie zoptymalizowanej powierzchni TIN...")
+                density_multiplier = 10
+                rows_sparse = int(rows / density_multiplier)
+                cols_sparse = int(cols / density_multiplier)
+                messages.AddMessage(f"Wizualizacja: tworzenie rzadkiej siatki {cols_sparse}x{rows_sparse} punktów...")
+
+                #Sparse NumPy grid
+                x_coords_sparse = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols_sparse)
+                y_coords_sparse = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows_sparse)
+                x_grid_sparse, y_grid_sparse = np.meshgrid(x_coords_sparse, y_coords_sparse)
+                y_grid_sparse = np.flipud(y_grid_sparse)
+                z_grid_sparse = z0 - (nx/nz) * (x_grid_sparse - x0) - (ny/nz) * (y_grid_sparse - y0)
+                points_xyz_sparse = np.vstack([x_grid_sparse.ravel(), y_grid_sparse.ravel(), z_grid_sparse.ravel()]).T
+
+                temp_points_for_tin = "in_memory/sparse_points"
+                arcpy.management.CreateFeatureclass("in_memory", "sparse_points", "POINT", spatial_reference = spatial_ref)
+                arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
+                with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
+                    for p in points_xyz_sparse: 
+                        cursor.insertRow(((p[0], p[1]), p[2]))
+
+                #Output TIN layer
+                messages.AddMessage("Tworzenie wynikowej powierzchni TIN...")
+                tin_input_features = f"{temp_points_for_tin} Z_VALUE Mass_Points"
+                arcpy.ddd.CreateTin(output_surface, spatial_ref, tin_input_features)
+                messages.AddMessage(f"Zapisano powierzchnię TIN w: {output_surface}")
+                arcpy.management.Delete(temp_points_for_tin)
 
                 messages.AddMessage("Zakończono pomyślnie!")
             
