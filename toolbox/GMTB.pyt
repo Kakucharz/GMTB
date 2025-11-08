@@ -220,8 +220,21 @@ class GenerujIntersekcje:
                 #Creating Intersection Line
                 messages.AddMessage("Znajdowanie precyzyjnej linii intersekcyjnej...")
                 intersection_raster = Con(abs(geologic_raster_dense - nmt_raster) < 1, 1)
-                arcpy.conversion.RasterToPolyline(intersection_raster, output_intersection, "ZERO", 0, "SIMPLIFY")
+                thinned_raster = arcpy.sa.Thin(intersection_raster, "ZERO", "NO_FILTER", "ROUND")
+                temp_raw_line = "in_memory/raw_line"
+                arcpy.conversion.RasterToPolyline(thinned_raster, temp_raw_line, "ZERO", 0, "NO_SIMPLIFY")
+
+                messages.AddMessage("Wygładzanie linii intersekcyjnej...")
+                    #temp_dissolved_line = "in_memory/dissolved_line"
+                    #arcpy.management.Dissolve(temp_raw_line, temp_dissolved_line)
+                    #simplification_tolerance = cell_size * 2
+                smoothing_tolerance = cell_size * 5 
+                    #arcpy.cartography.SimplifyLine(temp_dissolved_line, output_intersection, "POINT_REMOVE", simplification_tolerance)
+                arcpy.cartography.SmoothLine(temp_raw_line, output_intersection, "PAEK", smoothing_tolerance)
                 messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
+
+                arcpy.management.Delete(temp_raw_line)
+                    #arcpy.management.Delete(temp_dissolved_line)
 
                 #Creating TIN layer
                 messages.AddMessage("Tworzenie zoptymalizowanej powierzchni TIN...")
