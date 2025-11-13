@@ -25,6 +25,7 @@ class GenerujIntersekcje:
         self.description = "Tworzy płaszczyznę geologiczną i znajduje jej przecięcie z NMT"
 
     def getParameterInfo(self): #parametry narzędzia
+        #Param 0: method
         param0 = arcpy.Parameter(
             displayName = "Metoda generowania płaszczyzny",
             name = "method",
@@ -41,7 +42,7 @@ class GenerujIntersekcje:
 
         param0.value = param0.filter.list[2] #domyślna wartość parametru
 
-        #Parametr 0: punkty od użytkownika
+        #Param 1: input points
         param1 = arcpy.Parameter(
             displayName = "Warstwa punktów wejściowych",
             name = "input_points",
@@ -52,46 +53,80 @@ class GenerujIntersekcje:
 
         param1.filter.list = ["Point"] #akceptuje tylko warstwy punktowe
 
-        #Parametr 1: Kierunek zapadania Dir
+        #Param 2: orientation input method
         param2 = arcpy.Parameter(
+            displayName = "Sposób wprowadzania orientacji",
+            name = "one_point_method",
+            datatype = "GPString",
+            parameterType = "Optional", #widoczny tylko w metodzie 1P
+            direction = "Input"
+        )
+        param2.filter.type = "ValueList"
+        param2.filter.list = ["Manual input", "Choose column"]
+        param2.value = param2.filter.list[0]
+
+        #Parametr 1: Kierunek zapadania Dir
+        param3 = arcpy.Parameter(
             displayName = "Kierunek zapadania (Dir)",
-            name = "dir_value",
+            name = "dir_value_manual",
             datatype = "GPDouble",
             parameterType = "Optional",
             direction = "Input"
         )
 
         #Parametr 1: kąt upadu Dip
-        param3 = arcpy.Parameter(
+        param4 = arcpy.Parameter(
             displayName = "Kąt upadu (Dip)",
-            name = "dip_value",
+            name = "dip_value_manual",
             datatype = "GPDouble",
             parameterType = "Optional",
             direction = "Input"
         )
 
+        #Param 5: Dir input field
+        param5 = arcpy.Parameter(
+            displayName = "Dir field",
+            name = "dir_field",
+            datatype = "GPString",
+            parameterType = "Optional",
+            direction = "Input"
+        )
+        param5.filter.type = "Field"
+        param5.parameterDependencies = [param1.name]
+
+        #Param 6: Dip input field
+        param6 = arcpy.Parameter(
+            displayName = "Dip field",
+            name = "dip_field",
+            datatype = "GPString",
+            parameterType = "Optional",
+            direction = "Input"
+        )
+        param6.filter.type = "Field"
+        param6.parameterDependencies = [param1.name]
+
         #Promień linii intersekcyjnej
-        param4 = arcpy.Parameter(
+        param7 = arcpy.Parameter(
             displayName = "Rozmiar obszaru analizy [m]",
             name = "analysis_size",
             datatype = "GPDouble",
             parameterType = "Optional",
             direction = "Input"
         )
-        param4.value = 1000 #domyślna wartość
+        param7.value = 1000 #domyślna wartość
 
         # Parametr 5: Maksymalna odległość PIONOWA
-        param5 = arcpy.Parameter(
+        param8 = arcpy.Parameter(
             displayName = "Maks. odległość pionowa od terenu [m]",
             name = "vertical_distance",
             datatype = "GPDouble",
             parameterType = "Optional",
             direction = "Input"
         )
-        param5.value = 500 #domyślna wartość
+        param8.value = 500 #domyślna wartość
 
         #Parametr 1: raster NMT
-        param6 = arcpy.Parameter(
+        param9 = arcpy.Parameter(
             displayName = "Numeryczny Model Terenu (NMT)",
             name = "input_nmt_raster",
             datatype = "GPRasterLayer",
@@ -100,7 +135,7 @@ class GenerujIntersekcje:
         )
 
         #Parametr 2: ścieżka do zapisu wynikowego rastra płaszczyzny
-        param7 = arcpy.Parameter(
+        param10 = arcpy.Parameter(
             displayName = "Wynikowy TIN płaszczyzny geologicznej",
             name = "out_surface_tin",
             datatype = "DETin", 
@@ -109,7 +144,7 @@ class GenerujIntersekcje:
         )
 
         #Parametr 3: ścieżka do zapisu wynikowej linii intersekcyjnej
-        param8 = arcpy.Parameter(
+        param11 = arcpy.Parameter(
             displayName = "Wynikowa linia intersekcyjna",
             name = "out_intersection_line",
             datatype = "DEFeatureClass",
@@ -117,48 +152,94 @@ class GenerujIntersekcje:
             direction = "Output"
         )
 
-        return[param0, param1, param2, param3, param4, param5, param6, param7, param8]
+        param2.enabled = param3.enabled = param4.enabled = param5.enabled = param6.enabled = False
+        return[param0, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11]
 
     def updateParameters(self, parameters):
         """Modyfikuje parametry w zależności od wyboru użytkownika."""
 
-        if parameters[0].altered:
-            wybrana_metoda = parameters[0].valueAsText
-            if wybrana_metoda == "Jeden punkt z orientacją":
-                parameters[2].enabled = True  # Włącz Dir
-                parameters[3].enabled = True  # Włącz Dip
-            else:
-                parameters[2].enabled = False # Wyłącz Dir
-                parameters[3].enabled = False # Wyłącz Dip
-                parameters[2].value = None
-                parameters[3].value = None        
+        is_one_point_method = (parameters[0].valueAsText == "Jeden punkt z orientacją")
+
+        # Włączamy lub wyłączamy całą sekcję parametrów dla tej metody
+        parameters[2].enabled = is_one_point_method  # Przełącznik Wpisz/Tabela
+        
+        # Jeśli sekcja jest włączona, uruchamiamy wewnętrzną logikę
+        if is_one_point_method:
+            sub_method = parameters[2].valueAsText
+            
+            # Jeśli wybrano "Wpisz ręcznie"
+            if sub_method == "Manual input":
+                parameters[3].enabled = True  # Pokaż manualny Dir
+                parameters[4].enabled = True  # Pokaż manualny Dip
+                parameters[5].enabled = False # UKRYJ pole Dir
+                parameters[6].enabled = False # UKRYJ pole Dip
+            
+            # Jeśli wybrano "Odczytaj z tabeli"
+            elif sub_method == "Choose column":
+                parameters[3].enabled = False # UKRYJ manualny Dir
+                parameters[4].enabled = False # UKRYJ manualny Dip
+                parameters[5].enabled = True  # Pokaż pole Dir
+                parameters[6].enabled = True  # Pokaż pole Dip
+        
+                if parameters[1].value:
+                    try:
+                        # Pobieramy ścieżkę do warstwy
+                        input_layer_path = parameters[1].valueAsText
+                        # Tworzymy listę pól numerycznych ('Long' to 'Integer' w ArcPy)
+                        numeric_fields = [f.name for f in arcpy.ListFields(input_layer_path)
+                                          if f.type in ['Double', 'Single', 'Integer', 'SmallInteger']]
+                        
+                        # Wypełniamy nasze "półki" listą "książek"
+                        parameters[5].filter.list = numeric_fields
+                        parameters[6].filter.list = numeric_fields
+                    except Exception:
+                        # Jeśli coś pójdzie nie tak (np. zła warstwa), czyścimy listy
+                        parameters[5].filter.list = []
+                        parameters[6].filter.list = []
+                else:
+                    # Jeśli użytkownik usunie warstwę, czyścimy listy
+                    parameters[5].filter.list = []
+                    parameters[6].filter.list = []
+
+        # Jeśli główna metoda jest INNA, upewniamy się, że wszystko jest ukryte
+        else:
+            parameters[3].enabled = False
+            parameters[4].enabled = False
+            parameters[5].enabled = False
+            parameters[6].enabled = False
+        
+        
         return
+
 
     def updateMessages(self, parameters):
         """Waliduje wartości wprowadzone przez użytkownika i zwraca błędy."""
 
         # Walidacja pola Dir (parametr 2)
-        if parameters[2].enabled and parameters[2].value is not None:
-            if not (0 <= parameters[2].value < 360):
-                parameters[2].setErrorMessage("Wartość Kierunku (Dir) musi być w zakresie od 0 do 359.")
+        if parameters[3].enabled and parameters[3].value is not None:
+            if not (0 <= parameters[3].value < 360):
+                parameters[3].setErrorMessage("Wartość Kierunku (Dir) musi być w zakresie od 0 do 359.")
                 
         # Walidacja pola Dip (parametr 3)
-        if parameters[3].enabled and parameters[3].value is not None:
-            if not (0 <= parameters[3].value <= 90):
-                parameters[3].setErrorMessage("Wartość Kąta Upadu (Dip) musi być w zakresie od 0 do 90.")
+        if parameters[4].enabled and parameters[4].value is not None:
+            if not (0 <= parameters[4].value <= 90):
+                parameters[4].setErrorMessage("Wartość Kąta Upadu (Dip) musi być w zakresie od 0 do 90.")
 
         return
 
     def execute(self, parameters, messages):
         method = parameters[0].valueAsText
         input_points = parameters[1].valueAsText
-        dir_degrees = parameters[2].value
-        dip_degrees = parameters[3].value
-        analysis_size = parameters[4].value
-        vertical_distance = parameters[5].value
-        input_nmt = parameters[6].valueAsText
-        output_surface = parameters[7].valueAsText
-        output_intersection = parameters[8].valueAsText
+        one_point_method = parameters[2].valueAsText
+        dir_degrees = parameters[3].value
+        dip_degrees = parameters[4].value
+        dir_field = parameters[5].valueAsText
+        dip_field = parameters[6].valueAsText
+        analysis_size = parameters[7].value
+        vertical_distance = parameters[8].value
+        input_nmt = parameters[9].valueAsText
+        output_surface = parameters[10].valueAsText
+        output_intersection = parameters[11].valueAsText
         
         arcpy.env.overwriteOutput = True
 
@@ -168,6 +249,30 @@ class GenerujIntersekcje:
         if method == "Jeden punkt z orientacją":
             messages.AddMessage("Uruchomiono logikę dla metody: 1 punkt + Dip/Dir")
             
+            sub_method = parameters[2].valueAsText
+            
+            if sub_method == "Manual input":
+                messages.AddMessage("Pobieranie orientacji z wartości wpisanych ręcznie...")
+                dir_degrees = parameters[3].value
+                dip_degrees = parameters[4].value
+            
+            elif sub_method == "Choose column":
+                messages.AddMessage("Pobieranie orientacji z tabeli atrybutów...")
+                dir_field = parameters[5].valueAsText
+                dip_field = parameters[6].valueAsText
+                
+                if not dir_field or not dip_field:
+                    raise Exception("Proszę wybrać pola z tabeli atrybutów dla wartości Dir i Dip.")
+                
+                # Używamy SearchCursor do odczytania wartości z pierwszego punktu
+                with arcpy.da.SearchCursor(input_points, [dir_field, dip_field]) as cursor:
+                    row = next(cursor, None)
+                    if row is None:
+                        raise Exception("Warstwa wejściowa nie zawiera punktów.")
+                    dir_degrees = row[0]
+                    dip_degrees = row[1]
+                messages.AddMessage(f"Odczytano wartości: Dir = {dir_degrees}, Dip = {dip_degrees}")
+
             try:
                 #ETAP 1: DEFINICJA OBSZARU ANALIZY 
                 messages.AddMessage(f"Definiowanie kwadratowego obszaru analizy o boku {analysis_size}m...")
