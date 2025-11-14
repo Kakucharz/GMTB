@@ -189,11 +189,10 @@ class GenerujIntersekcje:
                         numeric_fields = [f.name for f in arcpy.ListFields(input_layer_path)
                                           if f.type in ['Double', 'Single', 'Integer', 'SmallInteger']]
                         
-                        # Wypełniamy nasze "półki" listą "książek"
                         parameters[5].filter.list = numeric_fields
                         parameters[6].filter.list = numeric_fields
                     except Exception:
-                        # Jeśli coś pójdzie nie tak (np. zła warstwa), czyścimy listy
+                        # Czyszczenie list w przypadku błędu
                         parameters[5].filter.list = []
                         parameters[6].filter.list = []
                 else:
@@ -230,7 +229,7 @@ class GenerujIntersekcje:
     def execute(self, parameters, messages):
         method = parameters[0].valueAsText
         input_points = parameters[1].valueAsText
-        one_point_method = parameters[2].valueAsText
+        sub_method = parameters[2].valueAsText
         dir_degrees = parameters[3].value
         dip_degrees = parameters[4].value
         dir_field = parameters[5].valueAsText
@@ -249,29 +248,36 @@ class GenerujIntersekcje:
         if method == "Jeden punkt z orientacją":
             messages.AddMessage("Uruchomiono logikę dla metody: 1 punkt + Dip/Dir")
             
-            sub_method = parameters[2].valueAsText
+            dir_degrees = None
+            dip_degrees = None
             
             if sub_method == "Manual input":
                 messages.AddMessage("Pobieranie orientacji z wartości wpisanych ręcznie...")
                 dir_degrees = parameters[3].value
                 dip_degrees = parameters[4].value
+
+                if dir_degrees is None or dip_degrees is None:
+                    raise ValueError("The value for dip or dir parameter is missing")
             
             elif sub_method == "Choose column":
                 messages.AddMessage("Pobieranie orientacji z tabeli atrybutów...")
-                dir_field = parameters[5].valueAsText
-                dip_field = parameters[6].valueAsText
-                
                 if not dir_field or not dip_field:
-                    raise Exception("Proszę wybrać pola z tabeli atrybutów dla wartości Dir i Dip.")
+                    raise ValueError("Proszę wybrać pola z tabeli atrybutów dla wartości Dir i Dip.")
                 
-                # Używamy SearchCursor do odczytania wartości z pierwszego punktu
                 with arcpy.da.SearchCursor(input_points, [dir_field, dip_field]) as cursor:
                     row = next(cursor, None)
-                    if row is None:
-                        raise Exception("Warstwa wejściowa nie zawiera punktów.")
-                    dir_degrees = row[0]
-                    dip_degrees = row[1]
+                    if row is None: raise Exception("Warstwa wejściowa nie zawiera punktów.")
+                    
+                    try:
+                        # convert to float, if possible
+                        dir_degrees = float(row[0])
+                        dip_degrees = float(row[1])
+                    except (TypeError, ValueError):
+                        raise TypeError(f"Nieprawidłowy format danych w tabeli atrybutów. "
+                                        f"Pola '{dir_field}' i '{dip_field}' muszą zawierać wartości liczbowe, a nie tekst lub puste komórki.")
+
                 messages.AddMessage(f"Odczytano wartości: Dir = {dir_degrees}, Dip = {dip_degrees}")
+
 
             try:
                 #ETAP 1: DEFINICJA OBSZARU ANALIZY 
