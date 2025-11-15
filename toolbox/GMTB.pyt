@@ -4,6 +4,7 @@ import arcpy
 import math
 import numpy as np
 import timeit
+import os
 
 from arcpy.sa import (
     ExtractValuesToPoints,
@@ -152,8 +153,29 @@ class GenerujIntersekcje:
             direction = "Output"
         )
 
+        #Param 12: add to scene checkbox
+        param12 = arcpy.Parameter(
+            displayName = "Dodaj wynik do sceny",
+            name = "add_to_scene",
+            datatype = "GPBoolean",
+            parameterType = "Optional",
+            direction = "Input"
+        )
+        param12.value = False
+
+        #Param13: dropdown list with scenes
+        param13 = arcpy.Parameter(
+            displayName = "Wybierz scenę",
+            name = "target_scene",
+            datatype = "GPString",
+            parameterType = "Optional",
+            direction = "Input"
+        )
+        param13.filter.type = "ValueList"
+        param13.enabled = False
+
         param2.enabled = param3.enabled = param4.enabled = param5.enabled = param6.enabled = False
-        return[param0, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11]
+        return[param0, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13]
 
     def updateParameters(self, parameters):
         """Modyfikuje parametry w zależności od wyboru użytkownika."""
@@ -206,8 +228,24 @@ class GenerujIntersekcje:
             parameters[4].enabled = False
             parameters[5].enabled = False
             parameters[6].enabled = False
-        
-        
+
+        #Sprawdzenie stanu checkboxa
+        if parameters[12].value == True:
+            parameters[13].enabled = True
+
+            #Wypełnienia listy nazwami scen w projekcie
+            try:
+                aprx = arcpy.mp.ArcGISProject("CURRENT")
+                scene_names = [m.name for m in aprx.listMaps() if m.mapType == "SCENE"]
+                parameters[13].filter.list = scene_names
+            except Exception:
+                #jak nie ma scen to lista będzie pusta
+                parameters[13].filter.list = []
+        else:
+            #jeżeli odznaczymy to czyścimy listę scen
+            parameters[13].enabled = False
+            parameters[13].value = None
+
         return
 
 
@@ -239,6 +277,8 @@ class GenerujIntersekcje:
         input_nmt = parameters[9].valueAsText
         output_surface = parameters[10].valueAsText
         output_intersection = parameters[11].valueAsText
+        add_to_scene = parameters[12].value
+        target_scene_name = parameters[13].valueAsText
         
         arcpy.env.overwriteOutput = True
 
@@ -385,7 +425,7 @@ class GenerujIntersekcje:
                 messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
                 arcpy.management.Delete(temp_raw_line)
 
-                #ETAP 7: TWORZENIE ZOPTYMALIZOWANEGO TIN (POPRAWIONA LOGIKA!)
+                #ETAP 7: TWORZENIE ZOPTYMALIZOWANEGO TIN
                 messages.AddMessage("Tworzenie zoptymalizowanej powierzchni TIN...")
                 
                 # Rzedzenie punktów dla wydajności
@@ -430,7 +470,29 @@ class GenerujIntersekcje:
                 arcpy.ddd.EditTin(output_surface, [clip_features])
                 
                 messages.AddMessage(f"Zapisano przycięty TIN w: {output_surface}")
+
+                #ETAP 8: DODANIE WYNIKU DO SCENY
+                if add_to_scene and target_scene_name:
+                    try:
+                        aprx = arcpy.mp.ArcGISProject("CURRENT")
+                        scene = next((m for m in aprx.listMaps() if m.mapType == "SCENE" and m.name == target_scene_name), None)
+
+                        if not scene:
+                            messages.AddWarning(f"Nie znaleziono sceny o nazwie: '{target_scene_name}'. Pomięto dodawanie warstw.")
+                        else:
+                            messages.AddMessage(f"Dodawanie warstwy TIN '{os.path.basename(output_surface)}' do sceny '{target_scene_name}'...")
+                            scene.addDataFromPath(output_surface)
+                            
+                            messages.AddMessage(f"Dodawanie linii intersekcyjnej '{os.path.basename(output_intersection)}' do sceny '{target_scene_name}'...")
+                            scene.addDataFromPath(output_intersection)
+                            
+                            messages.AddMessage("Pomyślnie dodano warstwy do sceny.")
+
+                    except Exception as e:
+                        error_details = str(e)
+                        messages.AddWarning(f"Wystąpił błąd podczas dodawania warstw do sceny: {error_details}")
                 
+
                 # DIAGNOSTYKA: Sprawdź rzeczywisty zasięg TIN
                 messages.AddMessage("\n=== RZECZYWISTY ZASIĘG UTWORZONEGO TIN ===")
                 tin_desc = arcpy.Describe(output_surface)
@@ -444,7 +506,6 @@ class GenerujIntersekcje:
                 messages.AddMessage(f"  Rozpiętość Z: {tin_extent.ZMax - tin_extent.ZMin:.2f} m")
                 
                 # Podsumowanie
-                messages.AddMessage("Zakończono pomyślnie!")
                 messages.AddMessage("\n=== PODSUMOWANIE PARAMETRÓW ===")
                 messages.AddMessage(f"ZADANE przez użytkownika:")
                 messages.AddMessage(f"  - Rozmiar obszaru analizy XY: ±{half_size:.1f} m od punktu")
@@ -457,6 +518,7 @@ class GenerujIntersekcje:
                 
                 # Czyszczenie
                 arcpy.management.Delete(temp_points_for_tin)
+                messages.AddMessage("Zakończono pomyślnie!")
             
             except Exception as e:
                 import traceback
