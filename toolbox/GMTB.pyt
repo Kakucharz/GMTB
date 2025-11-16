@@ -582,38 +582,50 @@ class ObliczMiazszosc:
         self.description = "Oblicza miąższość pozorną i rzeczywistą na podstawie dwóch linii intersekcyjnych i kąta zapadania"
 
     def getParameterInfo(self):
-        #Param 0: linia 1
+        #Param 0: metoda obliczeń
         param0 = arcpy.Parameter(
+        displayName="Metoda obliczeń",
+        name="method",
+        datatype="GPString",
+        parameterType="Required",
+        direction="Input"
+        )
+        param0.filter.type = "ValueList"
+        param0.filter.list = ["Lokalna (w punkcie)", "Globalna (pesymistyczna)", "Globalna (optymistyczna)"]
+        param0.value = param0.filter.list[0]
+
+        #Param 1: linia 1
+        param1 = arcpy.Parameter(
             displayName = "Pierwsza linia intersekcyjna",
             name = "in_line_1",
             datatype = "GPFeatureLayer",
             parameterType = "Required",
             direction = "Input"
         )
-        param0.filter.list = ["Polyline"]
+        param1.filter.list = ["Polyline"]
 
-        #Param 1: linia 2
-        param1 = arcpy.Parameter(
+        #Param 2: linia 2
+        param2 = arcpy.Parameter(
             displayName = "Druga linia intersekcyjna",
             name = "in_line_2",
             datatype = "GPFeatureLayer",
             parameterType = "Required",
             direction = "Input"
         )
-        param1.filter.list = ["Polyline"]
+        param2.filter.list = ["Polyline"]
 
-        #Param 2: point
-        param2 = arcpy.Parameter(
+        #Param 3: point
+        param3 = arcpy.Parameter(
             displayName = "Punkt pomiaru",
             name = "in_point",
             datatype = "GPFeatureLayer",
-            parameterType = "Required",
+            parameterType = "Optional",
             direction = "Input"
         )
-        param2.filter.list = ["Point"]
+        param3.filter.list = ["Point"]
 
-        #Param 3: Kąt zapadania (DIP)
-        param3 = arcpy.Parameter(
+        #Param 4: Kąt zapadania (DIP)
+        param4 = arcpy.Parameter(
             displayName = "Kąt zapadania warstwy (dip)",
             name = "dip_angle",
             datatype = "GPDouble",
@@ -621,8 +633,8 @@ class ObliczMiazszosc:
             direction = "Input"
         )
 
-        #Param 4: output line
-        param4 = arcpy.Parameter(
+        #Param 5: output line
+        param5 = arcpy.Parameter(
             displayName = "Wynikowa linia pomiaru miąższości",
             name = "out_measurement_line",
             datatype = "DEFeatureClass",
@@ -630,74 +642,169 @@ class ObliczMiazszosc:
             direction = "Output"
         )
 
-        return [param0, param1, param2, param3, param4]
+        return [param0, param1, param2, param3, param4, param5]
 
+    def updateParameters(self, parameters):
+        # Pokaż/ukryj parametr punktu w zależności od wybranej metody
+        if parameters[0].value == "Lokalna (w punkcie)":
+            parameters[3].enabled = True
+            parameters[3].parameterType = "Required" # Staje się wymagany
+        else:
+            parameters[3].enabled = False
+            parameters[3].parameterType = "Optional" # Musi być opcjonalny, gdy ukryty
+        
+        # Twoja walidacja kąta (pamiętaj o zmianie indeksu)
+        if parameters[4].value is not None:
+            if not (0 < parameters[4].value <= 90):
+                parameters[4].setErrorMessage(...)
+        return
+    
     def updateMessages(self, parameters):
         #Walidacja wartości kąta zapadania
-        if parameters[3].value is not None:
-            if not ( 0 < parameters[3].value <= 90):
-                parameters[3].setErrorMessage("Kąt zapadania (Dip) musi być w zakresie (0, 90].")
+        if parameters[4].value is not None:
+            if not ( 0 < parameters[4].value <= 90):
+                parameters[4].setErrorMessage("Kąt zapadania (Dip) musi być w zakresie (0, 90].")
         return
 
     def execute(self, parameters, messages):
-        in_line_1 = parameters[0].valueAsText
-        in_line_2 = parameters[1].valueAsText
-        in_point = parameters[2].valueAsText
-        dip_angle = parameters[3].value
-        out_line = parameters[4].valueAsText
+        method = parameters[0].valueAsText
+        in_line_1 = parameters[1].valueAsText
+        in_line_2 = parameters[2].valueAsText
+        in_point = parameters[3].valueAsText
+        dip_angle = parameters[4].value
+        out_line = parameters[5].valueAsText
 
         arcpy.env.overwriteOutput = True
 
         try:
-            #ETAP 1: znalezienie punktu na linii
-            messages.AddMessage("Lokalizowanie punktu analizy")
-            arcpy.analysis.Near(in_point, in_line_1, location = True)
-
-            #odczytanie współrzędnych
+            # Inicjalizacja zmiennych, które zostaną wypełnione w zależności od metody
+            apparent_thickness = None
             start_point_coords = None
-            with arcpy.da.SearchCursor(in_point, ["NEAR_X", "NEAR_Y"]) as cursor:
-                row = next(cursor, None)
-                if row and row[0] != -1:
-                    start_point_coords = (row[0], row[1])
-
-            if not start_point_coords:
-                raise Exception("Nie udało się zlokalizować punktu na linii wskazanej jako pierwsza linia intersekcyjna. Sprawdź położenie punktu.")
-
-            
-            # --- ETAP 2: Pomiar odległości do Linii 2 (Miąższość Pozorna) ---
-            messages.AddMessage("Wyznaczanie miąższości pozornej...")
-            
-            #tymczasowa warstwa z punktem startowym
-            spatial_ref = arcpy.Describe(in_line_1).spatialReference
-            temp_start_point = arcpy.management.CreateFeatureclass("in_memory", "start_point", "POINT", spatial_reference = spatial_ref)[0]
-            with arcpy.da.InsertCursor(temp_start_point, ["SHAPE@XY"]) as cursor:
-                cursor.insertRow([start_point_coords])
-            
-            #POMIAR ODLEGŁOŚCI
-            arcpy.analysis.Near(temp_start_point, in_line_2, location=True)
-            
-            apparent_thickness = -1
             end_point_coords = None
-            with arcpy.da.SearchCursor(temp_start_point, ["NEAR_DIST", "NEAR_X", "NEAR_Y"]) as cursor:
-                row = next(cursor, None)
-                if row and row[0] != -1:
-                    apparent_thickness = row[0]
-                    end_point_coords = (row[1], row[2])
-            
-            arcpy.management.Delete(temp_start_point)
-            
-            if apparent_thickness == -1:
-                raise Exception("Nie udało się znaleźć punktu na Linii 2. Sprawdź, czy linie są blisko siebie.")
+            spatial_ref = arcpy.Describe(in_line_1).spatialReference
 
-            messages.AddMessage(f"ZNALEZIONO MIĄŻSZOŚĆ POZORNĄ: {apparent_thickness:.2f} m")
+            #CZĘŚĆ 1: Wyznaczenie miąższości pozornej zgodnie z wybraną metodą
+            if method == "Lokalna (w punkcie)":
+                messages.AddMessage("Uruchomiono metodę lokalną...")
+                
+                # Znalezienie punktu na Linii 1
+                arcpy.analysis.Near(in_point, in_line_1, location=True)
+                with arcpy.da.SearchCursor(in_point, ["NEAR_X", "NEAR_Y"]) as cursor:
+                    row = next(cursor, None)
+                    if row and row[0] != -1:
+                        start_point_coords = (row[0], row[1])
+                if not start_point_coords:
+                    raise Exception("Nie udało się zlokalizować punktu na pierwszej linii intersekcyjnej.")
 
-            # --- ETAP 3: Obliczenia i tworzenie wyniku (bez zmian) ---
+                # Pomiar do Linii 2
+                temp_start_point = arcpy.management.CreateFeatureclass("in_memory", "start_point", "POINT", spatial_reference=spatial_ref)[0]
+                with arcpy.da.InsertCursor(temp_start_point, ["SHAPE@XY"]) as cursor:
+                    cursor.insertRow([start_point_coords])
+                
+                arcpy.analysis.Near(temp_start_point, in_line_2, location=True)
+                
+                with arcpy.da.SearchCursor(temp_start_point, ["NEAR_DIST", "NEAR_X", "NEAR_Y"]) as cursor:
+                    row = next(cursor, None)
+                    if row and row[0] != -1:
+                        apparent_thickness = row[0]
+                        end_point_coords = (row[1], row[2])
+                
+                arcpy.management.Delete(temp_start_point)
+                if apparent_thickness is None:
+                    raise Exception("Nie udało się znaleźć punktu na drugiej linii intersekcyjnej.")
+                
+                messages.AddMessage(f"ZNALEZIONO MIĄŻSZOŚĆ POZORNĄ: {apparent_thickness:.2f} m")
+
+            elif method in ["Globalna (pesymistyczna)", "Globalna (optymistyczna)"]:
+                messages.AddMessage(f"Uruchomiono metodę globalną: {method}")
+                
+                # Dyskretyzacja
+                temp_points = "in_memory/densified_points"
+                arcpy.management.GeneratePointsAlongLines(in_line_1, temp_points, "DISTANCE", Distance="1 Meters")
+                
+                # Analiza 
+                arcpy.analysis.Near(temp_points, in_line_2, location=True, angle=True)
+                
+                # Zebranie wyników i wybór
+                if method == "Globalna (pesymistyczna)":
+                    # Logika dla pesymistycznej: szukamy absolutnego minimum
+                    results = {}
+                    with arcpy.da.SearchCursor(temp_points, ["SHAPE@X", "SHAPE@Y", "NEAR_DIST", "NEAR_X", "NEAR_Y"]) as cursor:
+                        for row in cursor:
+                            dist = row[2]
+                            if dist != -1:
+                                results[dist] = ((row[0], row[1]), (row[3], row[4]))
+                    if not results:
+                        raise Exception("Nie udało się znaleźć żadnej odległości między liniami.")
+                    
+                    target_distance = min(results.keys())
+                    messages.AddMessage(f"Znaleziono najkrótszą odległość (pesymistyczna): {target_distance:.2f} m")
+                    start_point_coords, end_point_coords = results[target_distance]
+                    apparent_thickness = target_distance
+
+                else: #logika dla optymistycznej
+                    messages.AddMessage("Filtrowanie wyników w poszukiwaniu najdłuższego prostopadłego odcinka...")
+                    
+                    # 1. Oblicz ogólny kierunek linii
+                    with arcpy.da.SearchCursor(in_line_1, ["SHAPE@"]) as cursor:
+                        line_geom = next(cursor)[0]
+                        p_start, p_end = line_geom.firstPoint, line_geom.lastPoint
+                        general_angle_rad = math.atan2(p_end.Y - p_start.Y, p_end.X - p_start.X)
+                        general_angle_deg = math.degrees(general_angle_rad)
+
+                    # 2. Oblicz idealne kąty prostopadłe (w obu kierunkach)
+                    perpendicular_angle_1 = (general_angle_deg + 90)
+                    # Normalizacja, aby kąt był w zakresie 0-360!
+                    if perpendicular_angle_1 < 0: perpendicular_angle_1 += 360
+                    perpendicular_angle_2 = (perpendicular_angle_1 + 180) % 360
+                    
+                    messages.AddMessage(f"Wykryto ogólny kierunek warstw: {general_angle_deg:.1f}°. Oczekiwane kąty pomiaru: {perpendicular_angle_1:.1f}° lub {perpendicular_angle_2:.1f}°")
+                    
+                    # 3. Filtruj wyniki i znajdź najlepszy
+                    angle_tolerance = 20
+                    filtered_results = []
+                    
+                    with arcpy.da.SearchCursor(temp_points, ["SHAPE@X", "SHAPE@Y", "NEAR_DIST", "NEAR_X", "NEAR_Y", "NEAR_ANGLE"]) as cursor:
+                        for row in cursor:
+                            dist, near_angle = row[2], row[5]
+                            if dist != -1:
+                                #Sprawdzamy oba możliwe kąty prostopadłe
+                                angle_diff1 = abs(near_angle - perpendicular_angle_1)
+                                if angle_diff1 > 180: angle_diff1 = 360 - angle_diff1
+
+                                angle_diff2 = abs(near_angle - perpendicular_angle_2)
+                                if angle_diff2 > 180: angle_diff2 = 360 - angle_diff2
+                                
+                                # Jeśli którykolwiek z kątów pasuje, akceptujemy wynik
+                                if min(angle_diff1, angle_diff2) <= angle_tolerance:
+                                    start_xy = (row[0], row[1])
+                                    end_xy = (row[3], row[4])
+                                    filtered_results.append((dist, start_xy, end_xy))
+
+                    if not filtered_results:
+                        raise Exception(f"Nie znaleziono żadnego odcinka pomiarowego w tolerancji kątowej {angle_tolerance}°. Spróbuj z innymi danymi lub zwiększ tolerancję.")
+                    
+                    # Znajdź wynik o maksymalnej długości (bez zmian)
+                    best_result = max(filtered_results, key = lambda item: item[0])
+                    
+                    apparent_thickness = best_result[0]
+                    start_point_coords = best_result[1]
+                    end_point_coords = best_result[2]
+                    messages.AddMessage(f"Znaleziono najdłuższą odległość (optymistyczną) z filtrowaniem: {apparent_thickness:.2f} m")
+                
+                # Wspólne czyszczenie dla obu metod globalnych
+                arcpy.management.Delete(temp_points)
+
+            # CZĘŚĆ 2: Obliczenia i tworzenie wyniku (wspólne dla wszystkich metod)
+            if apparent_thickness is None:
+                raise Exception("Nie udało się wyznaczyć miąższości pozornej. Sprawdź parametry.")
+
             messages.AddMessage("Obliczanie miąższości rzeczywistej...")
-            
             dip_rad = math.radians(dip_angle)
             true_thickness = apparent_thickness * math.sin(dip_rad)
             messages.AddMessage(f"OBLICZONO MIĄŻSZOŚĆ RZECZYWISTĄ: {true_thickness:.2f} m")
 
+            messages.AddMessage("Tworzenie warstwy wynikowej...")
             arcpy.management.CreateFeatureclass(os.path.dirname(out_line), os.path.basename(out_line), "POLYLINE", spatial_reference=spatial_ref)
             arcpy.management.AddField(out_line, "Miazszosc_Pozorna", "DOUBLE")
             arcpy.management.AddField(out_line, "Miazszosc_Rzeczywista", "DOUBLE")
@@ -713,9 +820,6 @@ class ObliczMiazszosc:
 
         except Exception as e:
             messages.AddError(f"Wystąpił błąd: {e}")
-            raise
+            raise # Rzuć błąd, aby narzędzie zakończyło się jako "nieudane"
 
         return
-
-
-
