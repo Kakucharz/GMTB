@@ -18,7 +18,7 @@ class Toolbox:
         self.label = "GMTB"
         self.alias = "gmtb"
 
-        self.tools = [GenerujIntersekcje]
+        self.tools = [GenerujIntersekcje, ObliczMiazszosc]
 
 class GenerujIntersekcje:
     def __init__(self):
@@ -575,4 +575,147 @@ class GenerujIntersekcje:
             return
         
         return
+
+class ObliczMiazszosc:
+    def __init__(self):
+        self.label = "Oblicz Miąższość"
+        self.description = "Oblicza miąższość pozorną i rzeczywistą na podstawie dwóch linii intersekcyjnych i kąta zapadania"
+
+    def getParameterInfo(self):
+        #Param 0: linia 1
+        param0 = arcpy.Parameter(
+            displayName = "Pierwsza linia intersekcyjna",
+            name = "in_line_1",
+            datatype = "GPFeatureLayer",
+            parameterType = "Required",
+            direction = "Input"
+        )
+        param0.filter.list = ["Polyline"]
+
+        #Param 1: linia 2
+        param1 = arcpy.Parameter(
+            displayName = "Druga linia intersekcyjna",
+            name = "in_line_2",
+            datatype = "GPFeatureLayer",
+            parameterType = "Required",
+            direction = "Input"
+        )
+        param1.filter.list = ["Polyline"]
+
+        #Param 2: point
+        param2 = arcpy.Parameter(
+            displayName = "Punkt pomiaru",
+            name = "in_point",
+            datatype = "GPFeatureLayer",
+            parameterType = "Required",
+            direction = "Input"
+        )
+        param2.filter.list = ["Point"]
+
+        #Param 3: Kąt zapadania (DIP)
+        param3 = arcpy.Parameter(
+            displayName = "Kąt zapadania warstwy (dip)",
+            name = "dip_angle",
+            datatype = "GPDouble",
+            parameterType = "Required",
+            direction = "Input"
+        )
+
+        #Param 4: output line
+        param4 = arcpy.Parameter(
+            displayName = "Wynikowa linia pomiaru miąższości",
+            name = "out_measurement_line",
+            datatype = "DEFeatureClass",
+            parameterType = "Required",
+            direction = "Output"
+        )
+
+        return [param0, param1, param2, param3, param4]
+
+    def updateMessages(self, parameters):
+        #Walidacja wartości kąta zapadania
+        if parameters[3].value is not None:
+            if not ( 0 < parameters[3].value <= 90):
+                parameters[3].setErrorMessage("Kąt zapadania (Dip) musi być w zakresie (0, 90].")
+        return
+
+    def execute(self, parameters, messages):
+        in_line_1 = parameters[0].valueAsText
+        in_line_2 = parameters[1].valueAsText
+        in_point = parameters[2].valueAsText
+        dip_angle = parameters[3].value
+        out_line = parameters[4].valueAsText
+
+        arcpy.env.overwriteOutput = True
+
+        try:
+            #ETAP 1: znalezienie punktu na linii
+            messages.AddMessage("Lokalizowanie punktu analizy")
+            arcpy.analysis.Near(in_point, in_line_1, location = True)
+
+            #odczytanie współrzędnych
+            start_point_coords = None
+            with arcpy.da.SearchCursor(in_point, ["NEAR_X", "NEAR_Y"]) as cursor:
+                row = next(cursor, None)
+                if row and row[0] != -1:
+                    start_point_coords = (row[0], row[1])
+
+            if not start_point_coords:
+                raise Exception("Nie udało się zlokalizować punktu na linii wskazanej jako pierwsza linia intersekcyjna. Sprawdź położenie punktu.")
+
+            
+            # --- ETAP 2: Pomiar odległości do Linii 2 (Miąższość Pozorna) ---
+            messages.AddMessage("Wyznaczanie miąższości pozornej...")
+            
+            #tymczasowa warstwa z punktem startowym
+            spatial_ref = arcpy.Describe(in_line_1).spatialReference
+            temp_start_point = arcpy.management.CreateFeatureclass("in_memory", "start_point", "POINT", spatial_reference = spatial_ref)[0]
+            with arcpy.da.InsertCursor(temp_start_point, ["SHAPE@XY"]) as cursor:
+                cursor.insertRow([start_point_coords])
+            
+            #POMIAR ODLEGŁOŚCI
+            arcpy.analysis.Near(temp_start_point, in_line_2, location=True)
+            
+            apparent_thickness = -1
+            end_point_coords = None
+            with arcpy.da.SearchCursor(temp_start_point, ["NEAR_DIST", "NEAR_X", "NEAR_Y"]) as cursor:
+                row = next(cursor, None)
+                if row and row[0] != -1:
+                    apparent_thickness = row[0]
+                    end_point_coords = (row[1], row[2])
+            
+            arcpy.management.Delete(temp_start_point)
+            
+            if apparent_thickness == -1:
+                raise Exception("Nie udało się znaleźć punktu na Linii 2. Sprawdź, czy linie są blisko siebie.")
+
+            messages.AddMessage(f"ZNALEZIONO MIĄŻSZOŚĆ POZORNĄ: {apparent_thickness:.2f} m")
+
+            # --- ETAP 3: Obliczenia i tworzenie wyniku (bez zmian) ---
+            messages.AddMessage("Obliczanie miąższości rzeczywistej...")
+            
+            dip_rad = math.radians(dip_angle)
+            true_thickness = apparent_thickness * math.sin(dip_rad)
+            messages.AddMessage(f"OBLICZONO MIĄŻSZOŚĆ RZECZYWISTĄ: {true_thickness:.2f} m")
+
+            arcpy.management.CreateFeatureclass(os.path.dirname(out_line), os.path.basename(out_line), "POLYLINE", spatial_reference=spatial_ref)
+            arcpy.management.AddField(out_line, "Miazszosc_Pozorna", "DOUBLE")
+            arcpy.management.AddField(out_line, "Miazszosc_Rzeczywista", "DOUBLE")
+
+            with arcpy.da.InsertCursor(out_line, ["SHAPE@", "Miazszosc_Pozorna", "Miazszosc_Rzeczywista"]) as cursor:
+                start_p = arcpy.Point(*start_point_coords)
+                end_p = arcpy.Point(*end_point_coords)
+                line_geometry = arcpy.Polyline(arcpy.Array([start_p, end_p]), spatial_ref)
+                cursor.insertRow([line_geometry, apparent_thickness, true_thickness])
+
+            messages.AddMessage(f"Zapisano wynik w: {out_line}. Wyznaczone pomiary znajdują się w tabeli atrybutów.")
+            messages.AddMessage("Zakończono pomyślnie!")
+
+        except Exception as e:
+            messages.AddError(f"Wystąpił błąd: {e}")
+            raise
+
+        return
+
+
 
