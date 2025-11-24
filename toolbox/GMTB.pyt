@@ -516,6 +516,14 @@ class GenerujIntersekcje:
                 messages.AddMessage(f"  - Wysokość Y: {tin_extent.YMax - tin_extent.YMin:.1f} m")
                 messages.AddMessage(f"  - Rozpiętość Z: {tin_extent.ZMax - tin_extent.ZMin:.1f} m ({tin_extent.ZMin:.1f} - {tin_extent.ZMax:.1f} m n.p.m.)")
                 
+                #Zapisanie dip i dir do tabeli atrybutów
+                arcpy.management.AddField(output_intersection, "Dip", "DOUBLE", field_alias = "DIP")
+                arcpy.management.AddField(output_intersection, "Dir", "DOUBLE", field_alias = "DIR")
+
+                with arcpy.da.UpdateCursor(output_intersection, ["Dip", "Dir"]) as cursor:
+                    for row in cursor:
+                        cursor.updateRow([dip_degrees, dir_degrees])
+                
                 # Czyszczenie
                 arcpy.management.Delete(temp_points_for_tin)
                 messages.AddMessage("Zakończono pomyślnie!")
@@ -624,17 +632,41 @@ class ObliczMiazszosc:
         )
         param3.filter.list = ["Point"]
 
-        #Param 4: Kąt zapadania (DIP)
+        #Param 4: Dip input method
         param4 = arcpy.Parameter(
-            displayName = "Kąt zapadania warstwy (dip)",
-            name = "dip_angle",
-            datatype = "GPDouble",
+            displayName = "Sposób wprowadzania kąta zapadania",
+            name = "dip_input_method",
+            datatype = "GPString",
             parameterType = "Required",
             direction = "Input"
         )
+        param4.filter.type = "ValueList"
+        param4.filter.list = ["Wprowadź ręcznie", "Odczytaj automatycznie z Linii 1"]
+        param4.value = param4.filter.list[0]
 
-        #Param 5: output line
+        #Param 5: Kąt zapadania (DIP)
         param5 = arcpy.Parameter(
+            displayName = "Kąt zapadania warstwy (dip)",
+            name = "dip_angle",
+            datatype = "GPDouble",
+            parameterType = "Optional",
+            direction = "Input"
+        )
+
+        #Param 6: wybór pola dla kąta
+        param6 = arcpy.Parameter(
+            displayName = "Pole z wartością kąta (Dip)",
+            name = "dip_field",
+            datatype = "GPString",
+            parameterType ="Optional",
+            direction = "Input"
+        )
+        param6.filter.type = "Field"
+        # Ten parametr zależy od 'Linii 1' (param1)
+        param6.parameterDependencies = [param1.name] 
+
+        #Param 7: output line
+        param7 = arcpy.Parameter(
             displayName = "Wynikowa linia pomiaru miąższości",
             name = "out_measurement_line",
             datatype = "DEFeatureClass",
@@ -642,7 +674,7 @@ class ObliczMiazszosc:
             direction = "Output"
         )
 
-        return [param0, param1, param2, param3, param4, param5]
+        return [param0, param1, param2, param3, param4, param5, param6, param7]
 
     def updateParameters(self, parameters):
         # Pokaż/ukryj parametr punktu w zależności od wybranej metody
@@ -652,18 +684,56 @@ class ObliczMiazszosc:
         else:
             parameters[3].enabled = False
             parameters[3].parameterType = "Optional" # Musi być opcjonalny, gdy ukryty
+
+        # Widocznoać pola kąt
+        dip_method = parameters[4].value
+        if dip_method == "Wprowadź ręcznie":
+            parameters[5].enabled = True
+            parameters[5].parameterType = "Required"
+        else: 
+            parameters[5].enabled = False
+            parameters[5].parameterType = "Optional"
+
+        dip_method = parameters[4].value
+        manual_dip_param = parameters[5]
+        field_dip_param = parameters[6] 
+
+        if dip_method == "Wprowadź ręcznie":
+            manual_dip_param.enabled = True
+            manual_dip_param.parameterType = "Required"
+            field_dip_param.enabled = False
+            field_dip_param.parameterType = "Optional"
         
-        # Twoja walidacja kąta (pamiętaj o zmianie indeksu)
-        if parameters[4].value is not None:
-            if not (0 < parameters[4].value <= 90):
-                parameters[4].setErrorMessage(...)
+        else:
+            manual_dip_param.enabled = False
+            manual_dip_param.parameterType = "Optional"
+            field_dip_param.enabled = True
+            field_dip_param.parameterType = "Required"
+            
+            # Wypełnij listę polami numerycznymi z 'Linii 1'
+            in_line_1_param = parameters[1]
+            if in_line_1_param.value:
+                try:
+                    numeric_fields = [f.name for f in arcpy.ListFields(in_line_1_param.valueAsText)
+                                    if f.type in ['Double', 'Single', 'Integer', 'SmallInteger']]
+                    field_dip_param.filter.list = numeric_fields
+                except Exception:
+                    field_dip_param.filter.list = []
+            else:
+                field_dip_param.filter.list = []
+        
+        # walidacja kąta
+        if parameters[5].value is not None:
+            if not (0 < parameters[5].value < 90):
+                parameters[5].setErrorMessage(...)
+
         return
     
     def updateMessages(self, parameters):
         #Walidacja wartości kąta zapadania
-        if parameters[4].value is not None:
-            if not ( 0 < parameters[4].value <= 90):
-                parameters[4].setErrorMessage("Kąt zapadania (Dip) musi być w zakresie (0, 90].")
+        if parameters[5].value is not None:
+            if not ( 0 < parameters[5].value <= 90):
+                parameters[5].setErrorMessage("Kąt zapadania (Dip) musi być w zakresie (0, 90].")
         return
 
     def execute(self, parameters, messages):
@@ -671,12 +741,42 @@ class ObliczMiazszosc:
         in_line_1 = parameters[1].valueAsText
         in_line_2 = parameters[2].valueAsText
         in_point = parameters[3].valueAsText
-        dip_angle = parameters[4].value
-        out_line = parameters[5].valueAsText
+        dip_input_method = parameters[4].valueAsText
+        dip_angle_manual = parameters[5].value
+        dip_field_name = parameters[6].valueAsText
+        out_line = parameters[7].valueAsText
 
         arcpy.env.overwriteOutput = True
 
         try:
+            #wybór metody odczytu kąta
+            dip_angle = None
+            if dip_input_method == "Wprowadź ręcznie":
+                dip_angle = dip_angle_manual
+                if dip_angle is None:
+                    raise ValueError("Nie wprowadzono wartości dla kąta zapadania.")
+                messages.AddMessage(f"Użyto ręcznie wprowadzonego kąta zapadania: {dip_angle}°")
+            
+            else:
+                messages.AddMessage(f"Próba automatycznego odczytania kąta zapadania z pola '{dip_field_name}'...")
+                
+                # Sprawdź, czy użytkownik wybrał pole
+                if not dip_field_name:
+                    raise ValueError("Nie wybrano pola z tabeli atrybutów dla wartości Dip.")
+                
+                # Odczytaj wartość z wybranego pola
+                with arcpy.da.SearchCursor(in_line_1, [dip_field_name]) as cursor:
+                    row = next(cursor, None)
+                    if row is None: raise Exception("Warstwa 'Linia 1' jest pusta. Nie można odczytać kąta.")
+                    if row[0] is None: raise Exception(f"Wartość w polu '{dip_field_name}' jest pusta (Null).")
+                    
+                    dip_angle = float(row[0])
+                    messages.AddMessage(f"Pomyślnie odczytano kąt zapadania: {dip_angle}°")
+
+            # Walidacja odczytanego/wpisanego kąta
+            if not (0 < dip_angle <= 90):
+                raise ValueError(f"Kąt zapadania ({dip_angle}°) jest poza prawidłowym zakresem (0, 90].")
+
             # Inicjalizacja zmiennych, które zostaną wypełnione w zależności od metody
             apparent_thickness = None
             start_point_coords = None
