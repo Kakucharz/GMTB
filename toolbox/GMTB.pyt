@@ -412,12 +412,16 @@ class GenerujIntersekcje:
                 #ETAP 6: TWORZENIE LINII INTERSEKCYJNEJ
                 messages.AddMessage("Znajdowanie linii intersekcyjnej...")
                 
+                #Zwiększenie tolerancji dla lepszych wyników pionowych warstw
+                vertical_tolerance = max(1.0, cell_size * 2) 
+                messages.AddMessage(f"Użyto dynamicznej tolerancji pionowej: {vertical_tolerance:.2f} m")
+
                 intersection_raster = arcpy.NumPyArrayToRaster(
-                    np.where(np.abs(diff_grid) < 1.0, 1, np.nan), 
+                    np.where(np.abs(diff_grid) < vertical_tolerance, 1, np.nan),
                     lower_left, cell_size, cell_size
                 )
                 intersection_raster_int = arcpy.sa.Int(intersection_raster)
-                thinned_raster = arcpy.sa.Thin(intersection_raster_int, "ZERO", "NO_FILTER", "ROUND")
+                thinned_raster = arcpy.sa.Thin(intersection_raster_int, "ZERO", "FILTER", "ROUND")
                 temp_raw_line = "in_memory/raw_line"
                 arcpy.conversion.RasterToPolyline(thinned_raster, temp_raw_line, "ZERO", 0, "NO_SIMPLIFY")
                 smoothing_tolerance = cell_size * 5 
