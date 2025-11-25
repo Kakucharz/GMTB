@@ -472,25 +472,42 @@ class GenerujIntersekcje:
                 messages.AddMessage(f"Zapisano przycięty TIN w: {output_surface}")
 
                 #ETAP 8: DODANIE WYNIKU DO SCENY
-                if add_to_scene and target_scene_name:
-                    try:
-                        aprx = arcpy.mp.ArcGISProject("CURRENT")
-                        scene = next((m for m in aprx.listMaps() if m.mapType == "SCENE" and m.name == target_scene_name), None)
+                try:
+                    aprx = arcpy.mp.ArcGISProject("CURRENT")
+                    map_2d_to_add_to = None
 
+                    if aprx.activeMap and aprx.activeMap.mapType == "MAP":
+                        map_2d_to_add_to = aprx.activeMap
+                        messages.AddMessage(f"Aktywny widok to mapa 2D ('{map_2d_to_add_to.name}').")
+                    else:
+                        map_list_2d = [m for m in aprx.listMaps() if m.mapType == "MAP"]
+                        if map_list_2d:
+                            map_2d_to_add_to = map_list_2d[0] 
+                            messages.AddMessage(f"Aktywny widok nie jest mapą 2D. Znaleziono inną mapę do dodania wyniku: '{map_2d_to_add_to.name}'.")
+
+                    if map_2d_to_add_to:
+                        messages.AddMessage("Dodawanie linii intersekcyjnej do mapy 2D...")
+                        map_2d_to_add_to.addDataFromPath(output_intersection)
+                    else:
+                        # Opcja ostateczna: Nie ma ŻADNYCH map 2D w całym projekcie
+                        messages.AddWarning("Nie znaleziono żadnej mapy 2D w projekcie. Linia intersekcyjna nie została dodana do widoku 2D.")
+
+                    if add_to_scene and target_scene_name:
+                        messages.AddMessage(f"\nDodawanie wyników do wybranej sceny 3D: '{target_scene_name}'...")
+                        scene = next((m for m in aprx.listMaps() if m.mapType == "SCENE" and m.name == target_scene_name), None)
+                        
                         if not scene:
-                            messages.AddWarning(f"Nie znaleziono sceny o nazwie: '{target_scene_name}'. Pomięto dodawanie warstw.")
+                            messages.AddWarning(f"Nie znaleziono sceny o nazwie: '{target_scene_name}'. Pomięto dodawanie warstw do sceny.")
                         else:
-                            messages.AddMessage(f"Dodawanie warstwy TIN '{os.path.basename(output_surface)}' do sceny '{target_scene_name}'...")
+                            messages.AddMessage("Dodawanie warstwy TIN do sceny...")
                             scene.addDataFromPath(output_surface)
                             
-                            messages.AddMessage(f"Dodawanie linii intersekcyjnej '{os.path.basename(output_intersection)}' do sceny '{target_scene_name}'...")
+                            messages.AddMessage("Dodawanie linii intersekcyjnej do sceny...")
                             scene.addDataFromPath(output_intersection)
-                            
                             messages.AddMessage("Pomyślnie dodano warstwy do sceny.")
-
-                    except Exception as e:
-                        error_details = str(e)
-                        messages.AddWarning(f"Wystąpił błąd podczas dodawania warstw do sceny: {error_details}")
+                
+                except Exception as e:
+                    messages.AddWarning(f"Wystąpił nieoczekiwany błąd podczas dodawania warstw do widoków: {e}")
                 
 
                 # DIAGNOSTYKA: Sprawdź rzeczywisty zasięg TIN
@@ -836,6 +853,17 @@ class ObliczMiazszosc:
                                 results[dist] = ((row[0], row[1]), (row[3], row[4]))
                     if not results:
                         raise Exception("Nie udało się znaleźć żadnej odległości między liniami.")
+
+                    all_distances = list(results.keys())
+                    if all_distances:
+                        average_apparent = sum(all_distances) / len(all_distances)
+                        dip_rad = math.radians(dip_angle)
+                        average_real = average_apparent * math.sin(dip_rad)
+                        
+                        messages.AddMessage("--- Statystyki Globalne ---")
+                        messages.AddMessage(f"Średnia miąższość pozorna: {average_apparent:.2f} m")
+                        messages.AddMessage(f"Średnia miąższość rzeczywista: {average_real:.2f} m")
+                        messages.AddMessage("--------------------------")
                     
                     target_distance = min(results.keys())
                     messages.AddMessage(f"Znaleziono najkrótszą odległość (pesymistyczna): {target_distance:.2f} m")
@@ -883,6 +911,17 @@ class ObliczMiazszosc:
 
                     if not filtered_results:
                         raise Exception(f"Nie znaleziono żadnego odcinka pomiarowego w tolerancji kątowej {angle_tolerance}°. Spróbuj z innymi danymi lub zwiększ tolerancję.")
+
+                    all_filtered_distances = [r[0] for r in filtered_results] # Wyciągamy tylko odległości
+                    if all_filtered_distances:
+                        average_apparent = sum(all_filtered_distances) / len(all_filtered_distances)
+                        dip_rad = math.radians(dip_angle)
+                        average_real = average_apparent * math.sin(dip_rad)
+
+                        messages.AddMessage("--- Statystyki Globalne (dla odcinków prostopadłych) ---")
+                        messages.AddMessage(f"Średnia miąższość pozorna: {average_apparent:.2f} m")
+                        messages.AddMessage(f"Średnia miąższość rzeczywista: {average_real:.2f} m")
+                        messages.AddMessage("---------------------------------------------------------")
                     
                     # Znajdź wynik o maksymalnej długości (bez zmian)
                     best_result = max(filtered_results, key = lambda item: item[0])
