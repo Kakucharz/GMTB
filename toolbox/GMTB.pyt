@@ -265,13 +265,10 @@ class GenerujIntersekcje:
         return
 
     def execute(self, parameters, messages):
+        # --- ETAP 0: Pobieranie parametrów i przygotowanie środowiska ---
         method = parameters[0].valueAsText
         input_points = parameters[1].valueAsText
         sub_method = parameters[2].valueAsText
-        dir_degrees = parameters[3].value
-        dip_degrees = parameters[4].value
-        dir_field = parameters[5].valueAsText
-        dip_field = parameters[6].valueAsText
         analysis_size = parameters[7].value
         vertical_distance = parameters[8].value
         input_nmt = parameters[9].valueAsText
@@ -281,565 +278,188 @@ class GenerujIntersekcje:
         target_scene_name = parameters[13].valueAsText
         
         arcpy.env.overwriteOutput = True
-
         if arcpy.Exists(output_surface): arcpy.management.Delete(output_surface)
         if arcpy.Exists(output_intersection): arcpy.management.Delete(output_intersection)
 
-        if method == "Jeden punkt z orientacją":
-            messages.AddMessage("Uruchomiono logikę dla metody: 1 punkt + Dip/Dir")
-            
-            dir_degrees = None
-            dip_degrees = None
-            
-            if sub_method == "Manual input":
-                messages.AddMessage("Pobieranie orientacji z wartości wpisanych ręcznie...")
-                dir_degrees = parameters[3].value
-                dip_degrees = parameters[4].value
-
-                if dir_degrees is None or dip_degrees is None:
-                    raise ValueError("The value for dip or dir parameter is missing")
-            
-            elif sub_method == "Choose column":
-                messages.AddMessage("Pobieranie orientacji z tabeli atrybutów...")
-                if not dir_field or not dip_field:
-                    raise ValueError("Proszę wybrać pola z tabeli atrybutów dla wartości Dir i Dip.")
-                
-                with arcpy.da.SearchCursor(input_points, [dir_field, dip_field]) as cursor:
-                    row = next(cursor, None)
-                    if row is None: raise Exception("Warstwa wejściowa nie zawiera punktów.")
-                    
-                    try:
-                        # convert to float, if possible
-                        dir_degrees = float(row[0])
-                        dip_degrees = float(row[1])
-                    except (TypeError, ValueError):
-                        raise TypeError(f"Nieprawidłowy format danych w tabeli atrybutów. "
-                                        f"Pola '{dir_field}' i '{dip_field}' muszą zawierać wartości liczbowe, a nie tekst lub puste komórki.")
-
-                messages.AddMessage(f"Odczytano wartości: Dir = {dir_degrees}, Dip = {dip_degrees}")
-
-
+        # --- ŚCIEŻKA 1: Obsługa metody krzywej powierzchni ---
+        if method == "Wiele punktów (Spline)":
+            messages.AddMessage("Uruchomiono logikę dla metody: Spline")
             try:
-                #ETAP 1: DEFINICJA OBSZARU ANALIZY 
-                messages.AddMessage(f"Definiowanie kwadratowego obszaru analizy o boku {analysis_size}m...")
-                
-                # Używamy pełnego NMT do zdefiniowania układu współrzędnych
-                full_nmt_raster = Raster(input_nmt)
-                spatial_ref = full_nmt_raster.spatialReference
-
-                # Obliczamy centrum na podstawie punktu wejściowego
-                extent = arcpy.Describe(input_points).extent
-                center_x = (extent.XMin + extent.XMax) / 2
-                center_y = (extent.YMin + extent.YMax) / 2
-                
-                # Używamy analysis_size dla OBU wymiarów XY 
-                half_size = analysis_size / 2
-                min_x, max_x = center_x - half_size, center_x + half_size
-                min_y, max_y = center_y - half_size, center_y + half_size
-
-                # Tworzymy KWADRATOWY poligon w płaszczyźnie XY
-                square_polygon = arcpy.Polygon(arcpy.Array([
-                    arcpy.Point(min_x, min_y), arcpy.Point(min_x, max_y),
-                    arcpy.Point(max_x, max_y), arcpy.Point(max_x, min_y),
-                    arcpy.Point(min_x, min_y)
-                ]), spatial_ref)
-
-                #ETAP 2: USTAWIENIE ŚRODOWISKA PRACY
-                temp_mask_path = "in_memory/analysis_mask"
-                arcpy.management.CopyFeatures(square_polygon, temp_mask_path)
-                arcpy.env.extent = square_polygon.extent
-                arcpy.env.mask = temp_mask_path
-                arcpy.env.cellSize = input_nmt
-                arcpy.env.outputCoordinateSystem = spatial_ref
-                arcpy.env.snapRaster = input_nmt
-
-                messages.AddMessage("Jawne przycinanie NMT do obszaru analizy...")
-                nmt_clipped_raster = arcpy.sa.ExtractByMask(input_nmt, temp_mask_path)
-                
-                #ETAP 3: OBLICZENIA PŁASZCZYZNY (w ograniczonym zasięgu)
-                messages.AddMessage("Obliczanie parametrów płaszczyzny...")
-                temp_points_with_z = "in_memory/anchor_point"
-                ExtractValuesToPoints(input_points, nmt_clipped_raster, temp_points_with_z, "NONE", "VALUE_ONLY")
-
-                with arcpy.da.SearchCursor(temp_points_with_z, ["SHAPE@X", "SHAPE@Y", "RASTERVALU"]) as cursor:
-                    row = next(cursor, None)
-                    if row is None: raise Exception("Warstwa wejściowa nie zawiera punktów!")
-                    x0, y0, z0 = row[0], row[1], row[2]
-                arcpy.management.Delete(temp_points_with_z)
-                messages.AddMessage(f"Punkt zakotwiczenia: X={x0}, Y={y0}, Z={z0}")
-
-                # Matematyka płaszczyzny
-                dip_rad = math.radians(dip_degrees)
-                dir_rad = math.radians(dir_degrees)
-                nx = math.sin(dip_rad) * math.sin(dir_rad)
-                ny = math.sin(dip_rad) * math.cos(dir_rad)
-                nz = math.cos(dip_rad)
-                if nz == 0: raise Exception("Płaszczyzny pionowe nie są obecnie wspierane.")
-
-                #ETAP 4: TWORZENIE RASTRA NMT I PŁASZCZYZNY JAKO TABLIC NUMPY
-                messages.AddMessage("Tworzenie siatek NumPy dla terenu i płaszczyzny...")
-                
-                clipped_nmt_obj = Raster(nmt_clipped_raster) 
-                lower_left = clipped_nmt_obj.extent.lowerLeft
-                rows = clipped_nmt_obj.height
-                cols = clipped_nmt_obj.width
-                cell_size = clipped_nmt_obj.meanCellWidth
-                
-                # Generowanie siatek współrzędnych X i Y
-                x_coords = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols)
-                y_coords = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows)
-                x_grid, y_grid = np.meshgrid(x_coords, y_coords)
-                y_grid = np.flipud(y_grid) 
-                
-                # Obliczanie siatki Z dla płaszczyzny geologicznej
-                z_grid_geologic = z0 - (nx/nz) * (x_grid - x0) - (ny/nz) * (y_grid - y0)
-                z_grid_nmt = arcpy.RasterToNumPyArray(clipped_nmt_obj, nodata_to_value = np.nan)
-
-                #ETAP 5: PRZYCINANIE PIONOWE (filtrowanie według vertical_distance)
-                messages.AddMessage(f"Przycinanie płaszczyzny w pionie (max {vertical_distance}m od terenu)...")
-                diff_grid = z_grid_geologic - z_grid_nmt
-                
-                # Ustawiamy NaN dla punktów za daleko od terenu
-                z_grid_geologic[np.abs(diff_grid) > vertical_distance] = np.nan
-                
-                # Ograniczamy zakres Z do przedziału [z0-vertical_distance, z0+vertical_distance]
-                z_min_allowed = z0 - vertical_distance
-                z_max_allowed = z0 + vertical_distance
-                z_grid_geologic[(z_grid_geologic < z_min_allowed) | (z_grid_geologic > z_max_allowed)] = np.nan
-                
-                messages.AddMessage(f"Zakres Z dla TIN: {z_min_allowed:.1f} - {z_max_allowed:.1f} m n.p.m.")
-
-                #ETAP 6: TWORZENIE LINII INTERSEKCYJNEJ
-                messages.AddMessage("Znajdowanie linii intersekcyjnej...")
-                
-                intersection_raster = arcpy.NumPyArrayToRaster(
-                    np.where(np.abs(diff_grid) < 1.0, 1, np.nan), 
-                    lower_left, cell_size, cell_size
-                )
-                intersection_raster_int = arcpy.sa.Int(intersection_raster)
-                thinned_raster = arcpy.sa.Thin(intersection_raster_int, "ZERO", "NO_FILTER", "ROUND")
-                temp_raw_line = "in_memory/raw_line"
-                arcpy.conversion.RasterToPolyline(thinned_raster, temp_raw_line, "ZERO", 0, "NO_SIMPLIFY")
-                smoothing_tolerance = cell_size * 5 
-                arcpy.cartography.SmoothLine(temp_raw_line, output_intersection, "PAEK", smoothing_tolerance)
-                messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
-                arcpy.management.Delete(temp_raw_line)
-                
-                # Rzedzenie punktów dla wydajności
-                density_multiplier = 10
-                points_xyz_sparse = np.vstack([
-                    x_grid[::density_multiplier, ::density_multiplier].ravel(),
-                    y_grid[::density_multiplier, ::density_multiplier].ravel(),
-                    z_grid_geologic[::density_multiplier, ::density_multiplier].ravel()
-                ]).T
-                
-                # Usunięcie punktów z NaN
-                points_xyz_sparse = points_xyz_sparse[~np.isnan(points_xyz_sparse).any(axis=1)]
-                
-                if points_xyz_sparse.shape[0] == 0:
-                    raise Exception("Brak punktów do utworzenia TIN-a po filtracji. Zmień parametry.")
-                
-                messages.AddMessage(f"Liczba punktów dla TIN: {points_xyz_sparse.shape[0]}")
-
-                # Tworzenie warstwy punktowej 3D
-                temp_points_for_tin = "in_memory/sparse_points"
-                arcpy.management.CreateFeatureclass(
-                    "in_memory", "sparse_points", "POINT", 
-                    spatial_reference=spatial_ref, has_z="ENABLED"
-                )
-                
-                # Dodaj pole Z_VALUE dla TIN
-                arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
-                
-                with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
-                    for p in points_xyz_sparse:
-                        cursor.insertRow(((p[0], p[1]), p[2]))
-                
-                tin_input_features = f"{temp_points_for_tin} Z_VALUE Mass_Points"
-                arcpy.ddd.CreateTin(output_surface, spatial_ref, tin_input_features)
-                messages.AddMessage(f"Utworzono wstępny TIN")
-                
-                # Przycinanie TIN do kwadratowego obszaru XY
-                messages.AddMessage("Przycinanie TIN do prostokątnej obwiedni 2D (X/Y)...")
-                
-                # Użycie EditTin do przycięcia 
-                clip_features = f"{temp_mask_path} <None> Hard_Clip"
-                arcpy.ddd.EditTin(output_surface, [clip_features])
-                
-                messages.AddMessage(f"Zapisano przycięty TIN w: {output_surface}")
-
-                #ETAP 8: DODANIE WYNIKU DO SCENY
-                try:
-                    aprx = arcpy.mp.ArcGISProject("CURRENT")
-                    map_2d_to_add_to = None
-
-                    if aprx.activeMap and aprx.activeMap.mapType == "MAP":
-                        map_2d_to_add_to = aprx.activeMap
-                        messages.AddMessage(f"Aktywny widok to mapa 2D ('{map_2d_to_add_to.name}').")
-                    else:
-                        map_list_2d = [m for m in aprx.listMaps() if m.mapType == "MAP"]
-                        if map_list_2d:
-                            map_2d_to_add_to = map_list_2d[0] 
-                            messages.AddMessage(f"Aktywny widok nie jest mapą 2D. Znaleziono inną mapę do dodania wyniku: '{map_2d_to_add_to.name}'.")
-
-                    if map_2d_to_add_to:
-                        messages.AddMessage("Dodawanie linii intersekcyjnej do mapy 2D...")
-                        map_2d_to_add_to.addDataFromPath(output_intersection)
-                    else:
-                        # Opcja ostateczna: Nie ma ŻADNYCH map 2D w całym projekcie
-                        messages.AddWarning("Nie znaleziono żadnej mapy 2D w projekcie. Linia intersekcyjna nie została dodana do widoku 2D.")
-
-                    if add_to_scene and target_scene_name:
-                        messages.AddMessage(f"\nDodawanie wyników do wybranej sceny 3D: '{target_scene_name}'...")
-                        scene = next((m for m in aprx.listMaps() if m.mapType == "SCENE" and m.name == target_scene_name), None)
-                        
-                        if not scene:
-                            messages.AddWarning(f"Nie znaleziono sceny o nazwie: '{target_scene_name}'. Pomięto dodawanie warstw do sceny.")
-                        else:
-                            messages.AddMessage("Dodawanie warstwy TIN do sceny...")
-                            scene.addDataFromPath(output_surface)
-                            
-                            messages.AddMessage("Dodawanie linii intersekcyjnej do sceny...")
-                            scene.addDataFromPath(output_intersection)
-                            messages.AddMessage("Pomyślnie dodano warstwy do sceny.")
-                
-                except Exception as e:
-                    messages.AddWarning(f"Wystąpił nieoczekiwany błąd podczas dodawania warstw do widoków: {e}")
-                
-
-                # DIAGNOSTYKA: Sprawdź rzeczywisty zasięg TIN
-                messages.AddMessage("\n=== RZECZYWISTY ZASIĘG UTWORZONEGO TIN ===")
-                tin_desc = arcpy.Describe(output_surface)
-                tin_extent = tin_desc.extent
-                
-                messages.AddMessage(f"Zakres X: {tin_extent.XMin:.2f} - {tin_extent.XMax:.2f} m")
-                messages.AddMessage(f"  Szerokość: {tin_extent.XMax - tin_extent.XMin:.2f} m")
-                messages.AddMessage(f"Zakres Y: {tin_extent.YMin:.2f} - {tin_extent.YMax:.2f} m")
-                messages.AddMessage(f"  Wysokość: {tin_extent.YMax - tin_extent.YMin:.2f} m")
-                messages.AddMessage(f"Zakres Z: {tin_extent.ZMin:.2f} - {tin_extent.ZMax:.2f} m n.p.m.")
-                messages.AddMessage(f"  Rozpiętość Z: {tin_extent.ZMax - tin_extent.ZMin:.2f} m")
-                
-                # Podsumowanie
-                messages.AddMessage("\n=== PODSUMOWANIE PARAMETRÓW ===")
-                messages.AddMessage(f"ZADANE przez użytkownika:")
-                messages.AddMessage(f"  - Rozmiar obszaru analizy XY: ±{half_size:.1f} m od punktu")
-                messages.AddMessage(f"  - Maks. odległość pionowa: ±{vertical_distance:.1f} m")
-                messages.AddMessage(f"  - Oczekiwany zakres Z: {z_min_allowed:.1f} - {z_max_allowed:.1f} m n.p.m.")
-                messages.AddMessage(f"\nRZECZYWISTE wymiary TIN:")
-                messages.AddMessage(f"  - Szerokość X: {tin_extent.XMax - tin_extent.XMin:.1f} m")
-                messages.AddMessage(f"  - Wysokość Y: {tin_extent.YMax - tin_extent.YMin:.1f} m")
-                messages.AddMessage(f"  - Rozpiętość Z: {tin_extent.ZMax - tin_extent.ZMin:.1f} m ({tin_extent.ZMin:.1f} - {tin_extent.ZMax:.1f} m n.p.m.)")
-                
-                #Zapisanie dip i dir do tabeli atrybutów
-                arcpy.management.AddField(output_intersection, "Dip", "DOUBLE", field_alias = "DIP")
-                arcpy.management.AddField(output_intersection, "Dir", "DOUBLE", field_alias = "DIR")
-
-                with arcpy.da.UpdateCursor(output_intersection, ["Dip", "Dir"]) as cursor:
-                    for row in cursor:
-                        cursor.updateRow([dip_degrees, dir_degrees])
-                
-                # Czyszczenie
-                arcpy.management.Delete(temp_points_for_tin)
-                messages.AddMessage("Zakończono pomyślnie!")
-            
-            except Exception as e:
-                import traceback
-                error_msg = str(e)
-                messages.AddError(f"Wystąpił błąd: {error_msg}")
-                messages.AddMessage("Szczegóły błędu:")
-                tb_lines = traceback.format_exc().split('\n')
-                for line in tb_lines:
-                    if line.strip():
-                        messages.AddMessage(f"  {line}")
-                raise
-            finally:
-                arcpy.ClearEnvironment("extent")
-                arcpy.ClearEnvironment("mask")
-                if arcpy.Exists("in_memory/analysis_mask"):
-                    arcpy.management.Delete("in_memory/analysis_mask")
-            return
-#-----------------------------------------------------------------------------------------------------------------------------------------------
-        
-        elif method == "Metoda trzech punktów":
-            messages.AddMessage("Uruchomiono logikę dla metody: 3 punkty")
-            
-            try:
-                # ETAP 1: Walidacja i pobranie 3 punktów wejściowych
-                messages.AddMessage("Odczytywanie 3 punktów wejściowych i definiowanie obszaru analizy...")
-                
-                point_count = int(arcpy.management.GetCount(input_points)[0])
-                if point_count != 3:
-                    raise Exception(f"Warstwa wejściowa musi zawierać dokładnie 3 punkty. Obecnie zawiera: {point_count}.")
-
-                # Nadanie punktom wysokości (Z) z NMT
-                points_3d_temp = "in_memory/points_with_z"
-                arcpy.sa.ExtractValuesToPoints(input_points, input_nmt, points_3d_temp, "NONE", "VALUE_ONLY")
-
-                coords_list = []
-                with arcpy.da.SearchCursor(points_3d_temp, ["SHAPE@X", "SHAPE@Y", "RASTERVALU"]) as cursor:
-                    for row in cursor:
-                        if row[2] is None or row[2] < -1e38:
-                            raise Exception("Jeden z punktów znajduje się poza zasięgiem NMT lub w obszarze NoData.")
-                        coords_list.append(row)
-                arcpy.management.Delete(points_3d_temp)
-                
-                (x1, y1, z1), (x2, y2, z2), (x3, y3, z3) = coords_list[0], coords_list[1], coords_list[2]
-                
-                # Obliczamy centrum na podstawie 3 punktów
-                center_x = (x1 + x2 + x3) / 3
-                center_y = (y1 + y2 + y3) / 3
-                
-                # --- OD TEGO MIEJSCA LOGIKA JEST LUSTRZANYM ODBICIEM METODY 1-PUNKTOWEJ ---
-
-                # ETAP 1 i 2: Definicja obszaru i środowiska
-                messages.AddMessage(f"Definiowanie kwadratowego obszaru analizy o boku {analysis_size}m...")
-                spatial_ref = arcpy.Describe(input_nmt).spatialReference
-                half_size = analysis_size / 2
-                min_x, max_x = center_x - half_size, center_x + half_size
-                min_y, max_y = center_y - half_size, center_y + half_size
-                square_polygon = arcpy.Polygon(arcpy.Array([
-                    arcpy.Point(min_x, min_y), arcpy.Point(min_x, max_y),
-                    arcpy.Point(max_x, max_y), arcpy.Point(max_x, min_y)
-                ]), spatial_ref)
-                
-                temp_mask_path = "in_memory/analysis_mask"
-                arcpy.management.CopyFeatures(square_polygon, temp_mask_path)
-                arcpy.env.extent, arcpy.env.mask = square_polygon.extent, temp_mask_path
-                arcpy.env.cellSize, arcpy.env.outputCoordinateSystem = input_nmt, spatial_ref
-                arcpy.env.snapRaster = input_nmt
-                
-                messages.AddMessage("Jawne przycinanie NMT do obszaru analizy...")
-                nmt_clipped_raster = arcpy.sa.ExtractByMask(input_nmt, temp_mask_path)
-
-                # ETAP 3: Obliczenia płaszczyzny
-                messages.AddMessage("Obliczanie parametrów płaszczyzny...")
-                x0, y0, z0 = x2, y2, z2 # Używamy P2 jako punktu zakotwiczenia
-                
-                nx = (y1 - y2) * (z3 - z2) - (y3 - y2) * (z1 - z2)
-                ny = -((x1 - x2) * (z3 - z2) - (x3 - x2) * (z1 - z2))
-                nz = (x1 - x2) * (y3 - y2) - (x3 - x2) * (y1 - y2)
-                if nz == 0: raise Exception("Płaszczyzna jest pionowa. Ta metoda nie jest obecnie wspierana.")
-                messages.AddMessage(f"Punkt zakotwiczenia: X={x0:.2f}, Y={y0:.2f}, Z={z0:.2f}")
-
-                # ETAP 4: Tworzenie siatek NumPy
-                messages.AddMessage("Tworzenie siatek NumPy dla terenu i płaszczyzny...")
-                clipped_nmt_obj = Raster(nmt_clipped_raster)
-                lower_left, rows, cols, cell_size = clipped_nmt_obj.extent.lowerLeft, clipped_nmt_obj.height, clipped_nmt_obj.width, clipped_nmt_obj.meanCellWidth
-                x_coords = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols)
-                y_coords = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows)
-                x_grid, y_grid = np.meshgrid(x_coords, y_coords)
-                y_grid = np.flipud(y_grid)
-                z_grid_geologic = z0 - (nx/nz) * (x_grid - x0) - (ny/nz) * (y_grid - y0)
-                z_grid_nmt = arcpy.RasterToNumPyArray(clipped_nmt_obj, nodata_to_value=np.nan)
-
-                # ETAP 5: Przycinanie pionowe
-                messages.AddMessage(f"Przycinanie płaszczyzny w pionie (max {vertical_distance}m)...")
-                diff_grid = z_grid_geologic - z_grid_nmt
-                z_grid_geologic[np.abs(diff_grid) > vertical_distance] = np.nan
-                z_min_allowed, z_max_allowed = z0 - vertical_distance, z0 + vertical_distance
-                z_grid_geologic[(z_grid_geologic < z_min_allowed) | (z_grid_geologic > z_max_allowed)] = np.nan
-                
-                # ETAP 6: Tworzenie linii intersekcyjnej
-                messages.AddMessage("Znajdowanie linii intersekcyjnej...")
-                intersection_raster = arcpy.NumPyArrayToRaster(np.where(np.abs(diff_grid) < 1.0, 1, np.nan), lower_left, cell_size, cell_size)
-                thinned_raster = arcpy.sa.Thin(arcpy.sa.Int(intersection_raster), "ZERO", "NO_FILTER", "ROUND")
-                temp_raw_line = "in_memory/raw_line"
-                arcpy.conversion.RasterToPolyline(thinned_raster, temp_raw_line, "ZERO", 0, "NO_SIMPLIFY")
-                arcpy.cartography.SmoothLine(temp_raw_line, output_intersection, "PAEK", cell_size * 5)
-                arcpy.management.Delete(temp_raw_line)
-                messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
-
-                #ETAP 7: TWORZENIE PŁASZCZYZNY TIN
-                # Rzedzenie punktów dla wydajności
-                density_multiplier = 10
-                points_xyz_sparse = np.vstack([
-                    x_grid[::density_multiplier, ::density_multiplier].ravel(),
-                    y_grid[::density_multiplier, ::density_multiplier].ravel(),
-                    z_grid_geologic[::density_multiplier, ::density_multiplier].ravel()
-                ]).T
-                
-                # Usunięcie punktów z NaN
-                points_xyz_sparse = points_xyz_sparse[~np.isnan(points_xyz_sparse).any(axis=1)]
-                
-                if points_xyz_sparse.shape[0] == 0:
-                    raise Exception("Brak punktów do utworzenia TIN-a po filtracji. Zmień parametry.")
-                
-                messages.AddMessage(f"Liczba punktów dla TIN: {points_xyz_sparse.shape[0]}")
-
-                # Tworzenie warstwy punktowej 3D
-                temp_points_for_tin = "in_memory/sparse_points"
-                arcpy.management.CreateFeatureclass(
-                    "in_memory", "sparse_points", "POINT", 
-                    spatial_reference=spatial_ref, has_z="ENABLED"
-                )
-                
-                # Dodaj pole Z_VALUE dla TIN
-                arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
-                
-                with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
-                    for p in points_xyz_sparse:
-                        cursor.insertRow(((p[0], p[1]), p[2]))
-                
-                tin_input_features = f"{temp_points_for_tin} Z_VALUE Mass_Points"
-                arcpy.ddd.CreateTin(output_surface, spatial_ref, tin_input_features)
-                messages.AddMessage(f"Utworzono wstępny TIN")
-                
-                # Przycinanie TIN do kwadratowego obszaru XY
-                messages.AddMessage("Przycinanie TIN do prostokątnej obwiedni 2D (X/Y)...")
-                
-                # Użycie EditTin do przycięcia 
-                clip_features = f"{temp_mask_path} <None> Hard_Clip"
-                arcpy.ddd.EditTin(output_surface, [clip_features])
-                
-                messages.AddMessage(f"Zapisano przycięty TIN w: {output_surface}")
-                
-                temp_points_for_tin = "in_memory/sparse_points"
-                arcpy.management.CreateFeatureclass("in_memory", "sparse_points", "POINT", spatial_reference=spatial_ref, has_z="ENABLED")
-                arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
-                with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
-                    for p in points_xyz_sparse: cursor.insertRow(((p[0], p[1]), p[2]))
-                
-                arcpy.ddd.CreateTin(output_surface, spatial_ref, f"{temp_points_for_tin} Z_VALUE Mass_Points")
-                arcpy.ddd.EditTin(output_surface, [f"{temp_mask_path} <None> Hard_Clip"])
-                arcpy.management.Delete(temp_points_for_tin)
-                messages.AddMessage(f"Zapisano przycięty TIN w: {output_surface}")
-                
-                #ETAP 8: DODANIE WYNIKU DO SCENY
-                try:
-                    aprx = arcpy.mp.ArcGISProject("CURRENT")
-                    map_2d_to_add_to = None
-
-                    if aprx.activeMap and aprx.activeMap.mapType == "MAP":
-                        map_2d_to_add_to = aprx.activeMap
-                        messages.AddMessage(f"Aktywny widok to mapa 2D ('{map_2d_to_add_to.name}').")
-                    else:
-                        map_list_2d = [m for m in aprx.listMaps() if m.mapType == "MAP"]
-                        if map_list_2d:
-                            map_2d_to_add_to = map_list_2d[0] 
-                            messages.AddMessage(f"Aktywny widok nie jest mapą 2D. Znaleziono inną mapę do dodania wyniku: '{map_2d_to_add_to.name}'.")
-
-                    if map_2d_to_add_to:
-                        messages.AddMessage("Dodawanie linii intersekcyjnej do mapy 2D...")
-                        map_2d_to_add_to.addDataFromPath(output_intersection)
-                    else:
-                        # Opcja ostateczna: Nie ma ŻADNYCH map 2D w całym projekcie
-                        messages.AddWarning("Nie znaleziono żadnej mapy 2D w projekcie. Linia intersekcyjna nie została dodana do widoku 2D.")
-
-                    if add_to_scene and target_scene_name:
-                        messages.AddMessage(f"\nDodawanie wyników do wybranej sceny 3D: '{target_scene_name}'...")
-                        scene = next((m for m in aprx.listMaps() if m.mapType == "SCENE" and m.name == target_scene_name), None)
-                        
-                        if not scene:
-                            messages.AddWarning(f"Nie znaleziono sceny o nazwie: '{target_scene_name}'. Pomięto dodawanie warstw do sceny.")
-                        else:
-                            messages.AddMessage("Dodawanie warstwy TIN do sceny...")
-                            scene.addDataFromPath(output_surface)
-                            
-                            messages.AddMessage("Dodawanie linii intersekcyjnej do sceny...")
-                            scene.addDataFromPath(output_intersection)
-                            messages.AddMessage("Pomyślnie dodano warstwy do sceny.")
-                
-                except Exception as e:
-                    messages.AddWarning(f"Wystąpił nieoczekiwany błąd podczas dodawania warstw do widoków: {e}")
-                
-
-                # DIAGNOSTYKA: Sprawdź rzeczywisty zasięg TIN
-                messages.AddMessage("\n=== RZECZYWISTY ZASIĘG UTWORZONEGO TIN ===")
-                tin_desc = arcpy.Describe(output_surface)
-                tin_extent = tin_desc.extent
-                
-                messages.AddMessage(f"Zakres X: {tin_extent.XMin:.2f} - {tin_extent.XMax:.2f} m")
-                messages.AddMessage(f"  Szerokość: {tin_extent.XMax - tin_extent.XMin:.2f} m")
-                messages.AddMessage(f"Zakres Y: {tin_extent.YMin:.2f} - {tin_extent.YMax:.2f} m")
-                messages.AddMessage(f"  Wysokość: {tin_extent.YMax - tin_extent.YMin:.2f} m")
-                messages.AddMessage(f"Zakres Z: {tin_extent.ZMin:.2f} - {tin_extent.ZMax:.2f} m n.p.m.")
-                messages.AddMessage(f"  Rozpiętość Z: {tin_extent.ZMax - tin_extent.ZMin:.2f} m")
-                
-                # Podsumowanie
-                messages.AddMessage("\n=== PODSUMOWANIE PARAMETRÓW ===")
-                messages.AddMessage(f"ZADANE przez użytkownika:")
-                messages.AddMessage(f"  - Rozmiar obszaru analizy XY: ±{half_size:.1f} m od punktu")
-                messages.AddMessage(f"  - Maks. odległość pionowa: ±{vertical_distance:.1f} m")
-                messages.AddMessage(f"  - Oczekiwany zakres Z: {z_min_allowed:.1f} - {z_max_allowed:.1f} m n.p.m.")
-                messages.AddMessage(f"\nRZECZYWISTE wymiary TIN:")
-                messages.AddMessage(f"  - Szerokość X: {tin_extent.XMax - tin_extent.XMin:.1f} m")
-                messages.AddMessage(f"  - Wysokość Y: {tin_extent.YMax - tin_extent.YMin:.1f} m")
-                messages.AddMessage(f"  - Rozpiętość Z: {tin_extent.ZMax - tin_extent.ZMin:.1f} m ({tin_extent.ZMin:.1f} - {tin_extent.ZMax:.1f} m n.p.m.)")
-                
-                #Zapisanie dip i dir do tabeli atrybutów
-                messages.AddMessage("Obliczanie wynikowych wartości Dip i Dir z geometrii płaszczyzny...")
-
-                # Obliczanie kąta upadu (Dip) - Równanie 12 z PDF Hasbargena
-                # Kąt między wektorem normalnym a pionem
-                mag_xy = math.sqrt(nx**2 + ny**2)
-                mag_xyz = math.sqrt(nx**2 + ny**2 + nz**2)
-                dip_val = math.degrees(math.asin(mag_xy / mag_xyz))
-
-                # Obliczanie kierunku upadu (Dir)
-                # Jest to kierunek (azymut) rzutu wektora normalnego na płaszczyznę XY
-                dir_val = math.degrees(math.atan2(nx, ny))
-                if dir_val < 0:
-                    dir_val += 360
-                
-                messages.AddMessage(f"Obliczono: Dip = {dip_val:.1f}, Dir = {dir_val:.1f}")
-                arcpy.management.AddField(output_intersection, "Dip", "DOUBLE", field_alias = "DIP")
-                arcpy.management.AddField(output_intersection, "Dir", "DOUBLE", field_alias = "DIR")
-
-                with arcpy.da.UpdateCursor(output_intersection, ["Dip", "Dir"]) as cursor:
-                    for row in cursor:
-                        cursor.updateRow([dip_val, dir_val])
-                
-                # Czyszczenie
-                arcpy.management.Delete(temp_points_for_tin)
-                messages.AddMessage("Zakończono pomyślnie!")
-
-            except Exception as e:
-                import traceback
-                error_msg = str(e)
-                messages.AddError(f"Wystąpił błąd: {error_msg}")
-                tb_lines = traceback.format_exc().split('\n')
-                for line in tb_lines:
-                    if line.strip(): messages.AddMessage(f"  {line}")
-                raise
-            finally:
-                arcpy.ClearEnvironment("extent")
-                arcpy.ClearEnvironment("mask")
-                if arcpy.Exists("in_memory/analysis_mask"):
-                    arcpy.management.Delete("in_memory/analysis_mask")
-            return
-#-----------------------------------------------------------------------------------------------------------------------------------------------
-
-        elif method == "Wiele punktów (Spline)":
-            messages.AddMessage("Uruchomiono logikę dla metody: metoda splajnów dla wielu punktów")
-
-            try:
-                #odczytywanie wartości z rastra
                 temp_points_with_values = "in_memory/temp_points_extracted"
-                messages.AddMessage("Odczytywanie wartości z NMT...")
                 arcpy.sa.ExtractValuesToPoints(input_points, input_nmt, temp_points_with_values, "NONE", "VALUE_ONLY")
-                #tworzenie płaszczyzny za pomocą splajnów
-                messages.AddMessage("Tworzenie gładkiej powierzchni z punktów metodą Spline...")
-                tension_weight = 20
-                geologic_surface = arcpy.sa.Spline(temp_points_with_values, z_field = "RASTERVALU", spline_type = "TENSION", weight = tension_weight) #używam pola Z do interpolacji
+                messages.AddMessage("Tworzenie gładkiej powierzchni i linii intersekcyjnej...")
+                geologic_surface = arcpy.sa.Spline(temp_points_with_values, "RASTERVALU", "TENSION", weight=20)
                 geologic_surface.save(output_surface)
-                messages.AddMessage(f"Zapisano raster płaszczyzny w: {output_surface}")
-
-                #szukanie linii przecięcia
-                messages.AddMessage("Tworzenie linii intersekcyjnej...")
-                intersection_raster = arcpy.sa.Con(abs(arcpy.Raster(input_nmt) - geologic_surface) <1 ,1) #tolerancja 1
-
-                #konwersja rastra przecięcia na linię
-                messages.AddMessage("Konwersja wyniku na warstwę liniową...")
+                intersection_raster = arcpy.sa.Con(abs(arcpy.Raster(input_nmt) - geologic_surface) < 1, 1)
                 arcpy.conversion.RasterToPolyline(intersection_raster, output_intersection, "ZERO", 0, "SIMPLIFY")
-                messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
-                messages.AddMessage("Zakończono pomyślnie!")
-
+                messages.AddMessage(f"Zapisano wyniki w '{output_surface}' i '{output_intersection}'.")
             except Exception as e:
-                messages.AddError(f"Wystąpił błąd: {e}")
-                raise # Rzuć błąd, aby narzędzie zakończyło się jako "nieudane"
-
-
+                messages.AddError(f"Wystąpił błąd w metodzie Spline: {e}")
+                raise
             return
+
+        # --- ŚCIEŻKA 2: Obsługa metod powierzchni płaskich ---
+        try:
+            # Inicjalizacja kluczowych zmiennych 
+            nx, ny, nz, x0, y0, z0, center_x, center_y = [None] * 8
+            dip_degrees_for_output, dir_degrees_for_output = None, None
+
+            #CZĘŚĆ 1: UNIKALNE OBLICZENIA (przygotowanie parametrów płaszczyzny dla obu metod)
+            
+            if method == "Jeden punkt z orientacją":
+                messages.AddMessage("Metoda 1-punktowa: Obliczanie parametrów płaszczyzny...")
+                if sub_method == "Manual input":
+                    dir_degrees, dip_degrees = parameters[3].value, parameters[4].value
+                else:
+                    dir_field, dip_field = parameters[5].valueAsText, parameters[6].valueAsText
+                    with arcpy.da.SearchCursor(input_points, [dir_field, dip_field]) as cursor:
+                        row = next(cursor, None); dir_degrees, dip_degrees = float(row[0]), float(row[1])
+                dip_degrees_for_output, dir_degrees_for_output = dip_degrees, dir_degrees
+                
+                #pobieram współrzędne punktu zakotwiczenia
+                temp_point_z = "in_memory/anchor_point"
+                arcpy.sa.ExtractValuesToPoints(input_points, input_nmt, temp_point_z, "NONE", "VALUE_ONLY")
+                with arcpy.da.SearchCursor(temp_point_z, ["SHAPE@X", "SHAPE@Y", "RASTERVALU"]) as cursor:
+                    row = next(cursor, None)
+                    if row is None or row[2] is None or row[2] < -1e38: raise Exception("Punkt wejściowy poza zasięgiem NMT.")
+                    x0, y0, z0 = row[0], row[1], row[2]
+                arcpy.management.Delete(temp_point_z)
+                
+                #zamiana Dip/Dir na wektor normalny (nx, ny, nz) za pomocą trygonometrii
+                dip_rad, dir_rad = math.radians(dip_degrees), math.radians(dir_degrees)
+                nx, ny, nz = math.sin(dip_rad) * math.sin(dir_rad), math.sin(dip_rad) * math.cos(dir_rad), math.cos(dip_rad)
+                extent = arcpy.Describe(input_points).extent
+                center_x, center_y = (extent.XMin + extent.XMax) / 2, (extent.YMin + extent.YMax) / 2
+
+            elif method == "Metoda trzech punktów":
+                messages.AddMessage("Metoda 3-punktowa: Obliczanie parametrów płaszczyzny...")
+                if int(arcpy.management.GetCount(input_points)[0]) != 3: raise Exception("Wymagane 3 punkty.")
+                
+                points_3d_temp = "in_memory/points_with_z"; arcpy.sa.ExtractValuesToPoints(input_points, input_nmt, points_3d_temp)
+                coords = [row for row in arcpy.da.SearchCursor(points_3d_temp, ["SHAPE@X", "SHAPE@Y", "RASTERVALU"])]; arcpy.management.Delete(points_3d_temp)
+                (x1, y1, z1), (x2, y2, z2), (x3, y3, z3) = coords[0], coords[1], coords[2]
+                
+                #zamiana 3 punkty na wektor normalny (nx, ny, nz) za pomocą iloczynu wektorowego
+                nx, ny, nz = (y1-y2)*(z3-z2)-(y3-y2)*(z1-z2), -((x1-x2)*(z3-z2)-(x3-x2)*(z1-z2)), (x1-x2)*(y3-y2)-(x3-x2)*(y1-y2)
+                x0, y0, z0 = x2, y2, z2
+                center_x, center_y = (x1+x2+x3)/3, (y1+y2+y3)/3
+
+            if nz == 0: raise Exception("Płaszczyzna jest pionowa. Ta metoda nie jest obecnie wspierana.")
+
+            #CZĘŚĆ 2: WSPÓLNY POTOK PRZETWARZANIA
+            messages.AddMessage("Rozpoczynanie wspólnego potoku przetwarzania...")
+            
+            #ETAP W1: Definicja obszaru i środowiska
+            spatial_ref = arcpy.Describe(input_nmt).spatialReference
+            half_size = analysis_size / 2
+            min_x, max_x, min_y, max_y = center_x-half_size, center_x+half_size, center_y-half_size, center_y+half_size
+            square_polygon = arcpy.Polygon(arcpy.Array([arcpy.Point(min_x, min_y), arcpy.Point(min_x, max_y), arcpy.Point(max_x, max_y), arcpy.Point(max_x, min_y)]), spatial_ref)
+            temp_mask_path = "in_memory/analysis_mask"
+            arcpy.management.CopyFeatures(square_polygon, temp_mask_path)
+            arcpy.env.extent, arcpy.env.mask, arcpy.env.cellSize, arcpy.env.outputCoordinateSystem, arcpy.env.snapRaster = square_polygon.extent, temp_mask_path, input_nmt, spatial_ref, input_nmt
+
+            #ETAP W2: Tworzenie siatek NumPy
+            messages.AddMessage("Tworzenie siatek NumPy...")
+            nmt_clipped_raster = arcpy.sa.ExtractByMask(input_nmt, temp_mask_path)
+            clipped_nmt_obj = Raster(nmt_clipped_raster)
+            lower_left, rows, cols, cell_size = clipped_nmt_obj.extent.lowerLeft, clipped_nmt_obj.height, clipped_nmt_obj.width, clipped_nmt_obj.meanCellWidth
+            x_coords = np.linspace(lower_left.X, lower_left.X + cell_size * (cols - 1), cols)
+            y_coords = np.linspace(lower_left.Y, lower_left.Y + cell_size * (rows - 1), rows)
+            x_grid, y_grid = np.meshgrid(x_coords, y_coords); y_grid = np.flipud(y_grid)
+            z_grid_geologic = z0 - (nx/nz) * (x_grid - x0) - (ny/nz) * (y_grid - y0)
+            z_grid_nmt = arcpy.RasterToNumPyArray(clipped_nmt_obj, nodata_to_value=np.nan)
+
+            #ETAP W3: Przycinanie pionowe i tworzenie linii intersekcyjnej
+            messages.AddMessage("Przycinanie i znajdowanie intersekcji...")
+            diff_grid = z_grid_geologic - z_grid_nmt
+
+            # Ustawiamy NaN dla punktów za daleko od terenu
+            z_grid_geologic[np.abs(diff_grid) > vertical_distance] = np.nan
+
+            # Ograniczamy zakres Z do przedziału [z0-vertical_distance, z0+vertical_distance]
+            z_min_allowed, z_max_allowed = z0 - vertical_distance, z0 + vertical_distance
+            z_grid_geologic[(z_grid_geologic < z_min_allowed) | (z_grid_geologic > z_max_allowed)] = np.nan
+
+            #tworzenie linii intersekcyjnej
+            intersection_raster = arcpy.NumPyArrayToRaster(np.where(np.abs(diff_grid) < 1.0, 1, np.nan), lower_left, cell_size, cell_size)
+            thinned_raster = arcpy.sa.Thin(arcpy.sa.Int(intersection_raster), "ZERO", "NO_FILTER", "ROUND")
+            temp_raw_line = "in_memory/raw_line"
+            arcpy.conversion.RasterToPolyline(thinned_raster, temp_raw_line, "ZERO", 0, "NO_SIMPLIFY")
+            arcpy.cartography.SmoothLine(temp_raw_line, output_intersection, "PAEK", cell_size * 5)
+            arcpy.management.Delete(temp_raw_line); messages.AddMessage(f"Zapisano linię intersekcyjną w: {output_intersection}")
+
+            #ETAP W4: Tworzenie TIN
+            messages.AddMessage("Tworzenie powierzchni TIN...")
+
+            #rzedzenie punktów dla wydajności
+            density_multiplier = 10
+            points_xyz_sparse = np.vstack([
+                    x_grid[::density_multiplier, ::density_multiplier].ravel(),
+                    y_grid[::density_multiplier, ::density_multiplier].ravel(),
+                    z_grid_geologic[::density_multiplier, ::density_multiplier].ravel()
+            ]).T
+
+            # Usunięcie punktów z NaN
+            points_xyz_sparse = points_xyz_sparse[~np.isnan(points_xyz_sparse).any(axis=1)]
+            if points_xyz_sparse.shape[0] == 0: raise Exception("Brak punktów do utworzenia TIN.")
+
+            # Tworzenie warstwy punktowej 3D
+            temp_points_for_tin = "in_memory/sparse_points"
+            arcpy.management.CreateFeatureclass("in_memory", "sparse_points", "POINT", spatial_reference=spatial_ref, has_z="ENABLED")
+
+            # Dodaj pole Z_VALUE dla TIN
+            arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
+
+            with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
+                for p in points_xyz_sparse: cursor.insertRow(((p[0], p[1]), p[2]))
+
+            arcpy.ddd.CreateTin(output_surface, spatial_ref, f"{temp_points_for_tin} Z_VALUE Mass_Points")
+            arcpy.ddd.EditTin(output_surface, [f"{temp_mask_path} <None> Hard_Clip"])
+            arcpy.management.Delete(temp_points_for_tin); messages.AddMessage(f"Zapisano TIN w: {output_surface}")
+
+            #ETAP W5: Dodawanie wyników na mapę i zapis atrybutów
+            aprx = arcpy.mp.ArcGISProject("CURRENT"); map_2d_to_add_to = None
+
+            if aprx.activeMap and aprx.activeMap.mapType == "MAP": map_2d_to_add_to = aprx.activeMap
+            else:
+                map_list_2d = [m for m in aprx.listMaps() if m.mapType == "MAP"]
+                if map_list_2d: map_2d_to_add_to = map_list_2d[0]
+            if map_2d_to_add_to: map_2d_to_add_to.addDataFromPath(output_intersection)
+            if add_to_scene and target_scene_name:
+                scene = next((m for m in aprx.listMaps() if m.mapType == "SCENE" and m.name == target_scene_name), None)
+                if scene: scene.addDataFromPath(output_surface); scene.addDataFromPath(output_intersection)
+
+            #rozróżniona logika dodawania dip i dir do tabeli atrybutów
+            if dip_degrees_for_output is not None:
+                arcpy.management.AddField(output_intersection, "Dip", "DOUBLE", field_alias="DIP")
+                arcpy.management.AddField(output_intersection, "Dir", "DOUBLE", field_alias="DIR")
+                with arcpy.da.UpdateCursor(output_intersection, ["Dip", "Dir"]) as cursor:
+                    for row in cursor: cursor.updateRow([dip_degrees_for_output, dir_degrees_for_output])
+            
+            elif method == "Metoda trzech punktów":
+                mag_xy = math.sqrt(nx**2 + ny**2); mag_xyz = math.sqrt(nx**2 + ny**2 + nz**2)
+                dip_val = math.degrees(math.asin(mag_xy / mag_xyz)); dir_val = math.degrees(math.atan2(nx, ny))
+                if dir_val < 0: dir_val += 360
+                arcpy.management.AddField(output_intersection, "Dip", "DOUBLE", field_alias="DIP")
+                arcpy.management.AddField(output_intersection, "Dir", "DOUBLE", field_alias="DIR")
+                with arcpy.da.UpdateCursor(output_intersection, ["Dip", "Dir"]) as cursor:
+                    for row in cursor: cursor.updateRow([dip_val, dir_val])
+
+            messages.AddMessage("\nZakończono pomyślnie!")
+
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            messages.AddError(f"Wystąpił błąd: {error_msg}")
+            tb_lines = traceback.format_exc().split('\n')
+            for line in tb_lines:
+                if line.strip(): messages.AddMessage(f"  {line}")
+            raise
+        finally:
+            arcpy.ClearEnvironment("extent")
+            arcpy.ClearEnvironment("mask")
+            if arcpy.Exists("in_memory/analysis_mask"):
+                arcpy.management.Delete("in_memory/analysis_mask")
         
         return
 
