@@ -8,7 +8,6 @@ import os
 
 from arcpy.sa import (
     ExtractValuesToPoints,
-    Spline,
     Con,
     Raster
 )
@@ -37,11 +36,10 @@ class GenerujIntersekcje:
         param0.filter.type = "ValueList"
         param0.filter.list = [
             "Jeden punkt z orientacją",
-            "Metoda trzech punktów",
-            "Wiele punktów (Spline)"
+            "Metoda trzech punktów"
         ]
 
-        param0.value = param0.filter.list[2] #domyślna wartość parametru
+        param0.value = param0.filter.list[1] #domyślna wartość parametru
 
         #Param 1: input points
         param1 = arcpy.Parameter(
@@ -63,7 +61,7 @@ class GenerujIntersekcje:
             direction = "Input"
         )
         param2.filter.type = "ValueList"
-        param2.filter.list = ["Manual input", "Choose column"]
+        param2.filter.list = ["Wprowadzenie ręczne", "Odczyt z tabeli atrybutów"]
         param2.value = param2.filter.list[0]
 
         #Parametr 1: Kierunek zapadania Dir
@@ -86,7 +84,7 @@ class GenerujIntersekcje:
 
         #Param 5: Dir input field
         param5 = arcpy.Parameter(
-            displayName = "Dir field",
+            displayName = "Kierunek zapadania (Dir)",
             name = "dir_field",
             datatype = "GPString",
             parameterType = "Optional",
@@ -97,7 +95,7 @@ class GenerujIntersekcje:
 
         #Param 6: Dip input field
         param6 = arcpy.Parameter(
-            displayName = "Dip field",
+            displayName = "Kąt upadu (Dip)",
             name = "dip_field",
             datatype = "GPString",
             parameterType = "Optional",
@@ -190,14 +188,14 @@ class GenerujIntersekcje:
             sub_method = parameters[2].valueAsText
             
             # Jeśli wybrano "Wpisz ręcznie"
-            if sub_method == "Manual input":
+            if sub_method == "Wprowadzenie ręczne":
                 parameters[3].enabled = True  # Pokaż manualny Dir
                 parameters[4].enabled = True  # Pokaż manualny Dip
                 parameters[5].enabled = False # UKRYJ pole Dir
                 parameters[6].enabled = False # UKRYJ pole Dip
             
-            # Jeśli wybrano "Odczytaj z tabeli"
-            elif sub_method == "Choose column":
+            # Jeśli wybrano "Odczyt z tabeli atrybutów"
+            elif sub_method == "Odczyt z tabeli atrybutów":
                 parameters[3].enabled = False # UKRYJ manualny Dir
                 parameters[4].enabled = False # UKRYJ manualny Dip
                 parameters[5].enabled = True  # Pokaż pole Dir
@@ -281,24 +279,7 @@ class GenerujIntersekcje:
         if arcpy.Exists(output_surface): arcpy.management.Delete(output_surface)
         if arcpy.Exists(output_intersection): arcpy.management.Delete(output_intersection)
 
-        # --- ŚCIEŻKA 1: Obsługa metody krzywej powierzchni ---
-        if method == "Wiele punktów (Spline)":
-            messages.AddMessage("Uruchomiono logikę dla metody: Spline")
-            try:
-                temp_points_with_values = "in_memory/temp_points_extracted"
-                arcpy.sa.ExtractValuesToPoints(input_points, input_nmt, temp_points_with_values, "NONE", "VALUE_ONLY")
-                messages.AddMessage("Tworzenie gładkiej powierzchni i linii intersekcyjnej...")
-                geologic_surface = arcpy.sa.Spline(temp_points_with_values, "RASTERVALU", "TENSION", weight=20)
-                geologic_surface.save(output_surface)
-                intersection_raster = arcpy.sa.Con(abs(arcpy.Raster(input_nmt) - geologic_surface) < 1, 1)
-                arcpy.conversion.RasterToPolyline(intersection_raster, output_intersection, "ZERO", 0, "SIMPLIFY")
-                messages.AddMessage(f"Zapisano wyniki w '{output_surface}' i '{output_intersection}'.")
-            except Exception as e:
-                messages.AddError(f"Wystąpił błąd w metodzie Spline: {e}")
-                raise
-            return
 
-        # --- ŚCIEŻKA 2: Obsługa metod powierzchni płaskich ---
         try:
             # Inicjalizacja kluczowych zmiennych 
             nx, ny, nz, x0, y0, z0, center_x, center_y = [None] * 8
@@ -308,7 +289,7 @@ class GenerujIntersekcje:
             
             if method == "Jeden punkt z orientacją":
                 messages.AddMessage("Metoda 1-punktowa: Obliczanie parametrów płaszczyzny...")
-                if sub_method == "Manual input":
+                if sub_method == "Wprowadzenie ręczne":
                     dir_degrees, dip_degrees = parameters[3].value, parameters[4].value
                 else:
                     dir_field, dip_field = parameters[5].valueAsText, parameters[6].valueAsText
@@ -391,7 +372,7 @@ class GenerujIntersekcje:
             #ETAP W4: Tworzenie TIN
             messages.AddMessage("Tworzenie powierzchni TIN...")
 
-            #rzedzenie punktów dla wydajności
+            #przerzedzenie punktów dla wydajności
             density_multiplier = 10
             points_xyz_sparse = np.vstack([
                     x_grid[::density_multiplier, ::density_multiplier].ravel(),
@@ -399,15 +380,15 @@ class GenerujIntersekcje:
                     z_grid_geologic[::density_multiplier, ::density_multiplier].ravel()
             ]).T
 
-            # Usunięcie punktów z NaN
+            #usunięcie punktów z NaN
             points_xyz_sparse = points_xyz_sparse[~np.isnan(points_xyz_sparse).any(axis=1)]
             if points_xyz_sparse.shape[0] == 0: raise Exception("Brak punktów do utworzenia TIN.")
 
-            # Tworzenie warstwy punktowej 3D
+            #tworzenie warstwy punktowej 3D
             temp_points_for_tin = "in_memory/sparse_points"
             arcpy.management.CreateFeatureclass("in_memory", "sparse_points", "POINT", spatial_reference=spatial_ref, has_z="ENABLED")
 
-            # Dodaj pole Z_VALUE dla TIN
+            #dodaj pole Z_VALUE dla TIN
             arcpy.management.AddField(temp_points_for_tin, "Z_VALUE", "DOUBLE")
 
             with arcpy.da.InsertCursor(temp_points_for_tin, ["SHAPE@XY", "Z_VALUE"]) as cursor:
@@ -520,7 +501,7 @@ class ObliczMiazszosc:
             direction = "Input"
         )
         param4.filter.type = "ValueList"
-        param4.filter.list = ["Wprowadź ręcznie", "Odczytaj automatycznie z Linii 1"]
+        param4.filter.list = ["Wprowadzenie ręczne", "Odczyt z Linii 1"]
         param4.value = param4.filter.list[0]
 
         #Param 5: Kąt zapadania (DIP)
@@ -566,7 +547,7 @@ class ObliczMiazszosc:
 
         # Widocznoać pola kąt
         dip_method = parameters[4].value
-        if dip_method == "Wprowadź ręcznie":
+        if dip_method == "Wprowadzenie ręczne":
             parameters[5].enabled = True
             parameters[5].parameterType = "Required"
         else: 
@@ -577,7 +558,7 @@ class ObliczMiazszosc:
         manual_dip_param = parameters[5]
         field_dip_param = parameters[6] 
 
-        if dip_method == "Wprowadź ręcznie":
+        if dip_method == "Wprowadzenie ręczne":
             manual_dip_param.enabled = True
             manual_dip_param.parameterType = "Required"
             field_dip_param.enabled = False
@@ -601,7 +582,7 @@ class ObliczMiazszosc:
             else:
                 field_dip_param.filter.list = []
         
-        # walidacja kąta
+        # Walidacja kąta
         if parameters[5].value is not None:
             if not (0 < parameters[5].value < 90):
                 parameters[5].setErrorMessage(...)
@@ -630,7 +611,7 @@ class ObliczMiazszosc:
         try:
             #wybór metody odczytu kąta
             dip_angle = None
-            if dip_input_method == "Wprowadź ręcznie":
+            if dip_input_method == "Wprowadzenie ręczne":
                 dip_angle = dip_angle_manual
                 if dip_angle is None:
                     raise ValueError("Nie wprowadzono wartości dla kąta zapadania.")
@@ -701,7 +682,7 @@ class ObliczMiazszosc:
                 temp_points = "in_memory/densified_points"
                 arcpy.management.GeneratePointsAlongLines(in_line_1, temp_points, "DISTANCE", Distance="1 Meters")
                 
-                # Analiza 
+                # Analiza Near
                 arcpy.analysis.Near(temp_points, in_line_2, location=True, angle=True)
                 
                 # Zebranie wyników i wybór
