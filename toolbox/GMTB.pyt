@@ -17,7 +17,7 @@ class Toolbox:
         self.label = "GMTB"
         self.alias = "gmtb"
 
-        self.tools = [GenerujIntersekcje, ObliczMiazszosc]
+        self.tools = [GenerujIntersekcje, ObliczMiazszosc, ObliczBladKierunku]
 
 class GenerujIntersekcje:
     def __init__(self):
@@ -803,5 +803,258 @@ class ObliczMiazszosc:
         except Exception as e:
             messages.AddError(f"Wystąpił błąd: {e}")
             raise # Rzuć błąd, aby narzędzie zakończyło się jako "nieudane"
+
+        return
+
+class ObliczBladKierunku:
+    def __init__(self):
+        self.label = "Oblicz Błąd Kierunku (Dir)"
+        self.description = "Oblicza błąd kierunku (Dir) poprzez analizę odchyleń między dwiema liniami uskoków."
+
+    def getParameterInfo(self):
+        # Parametr 0: Uskok wyznaczony przez użytkownika
+        param0 = arcpy.Parameter(
+            displayName = "Wyznaczony lineament",
+            name = "in_fault_user",
+            datatype = "GPFeatureLayer",
+            parameterType = "Required",
+            direction = "Input"
+        )
+        param0.filter.list = ["Polyline"]
+
+        # Parametr 1: Uskok referencyjny (z literatury)
+        param1 = arcpy.Parameter(
+            displayName = "Lineament referencyjny",
+            name = "in_fault_reference",
+            datatype = "GPFeatureLayer",
+            parameterType = "Required",
+            direction = "Input"
+        )
+        param1.filter.list = ["Polyline"]
+
+        # Parametr 2: Interwał generowania tranzytów
+        param2 = arcpy.Parameter(
+            displayName = "Interwał pomiaru",
+            name = "transect_interval",
+            datatype = "GPDouble",
+            parameterType = "Required",
+            direction = "Input"
+        )
+        param2.value = 20.0
+
+        # Parametr 3: Długość tranzytów (opcjonalna)
+        param3 = arcpy.Parameter(
+            displayName = "Długość linii pomiarowych",
+            name = "transect_length",
+            datatype = "GPDouble",
+            parameterType = "Optional",
+            direction = "Input"
+        )
+
+        # Parametr 4: Wynikowa warstwa liniowa
+        param4 = arcpy.Parameter(
+            displayName = "Wynikowe linie pomiaru",
+            name = "out_measurement_lines",
+            datatype = "DEFeatureClass",
+            parameterType = "Required",
+            direction = "Output"
+        )
+
+        # Parametr 5: Wynikowa tabela ze statystykami
+        param5 = arcpy.Parameter(
+            displayName = "Wynikowa tabela ze statystykami",
+            name = "out_statistics_table",
+            datatype = "DETable",
+            parameterType = "Required",
+            direction = "Output"
+        )
+
+        return [param0, param1, param2, param3, param4, param5]
+
+    def updateParameters(self, parameters):
+        """
+        (Opcjonalne) Tutaj można dodać logikę dynamicznego interfejsu.
+        Na razie pozostaje puste.
+        """
+        return
+
+    def updateMessages(self, parameters):
+        """
+        (Opcjonalne) Tutaj można dodać walidację parametrów na żywo.
+        Na razie pozostaje puste.
+        """
+        return
+
+    def execute(self, parameters, messages):
+        # --- ETAP 0: Pobranie parametrów i przygotowanie środowiska ---
+        in_fault_user = parameters[0].valueAsText
+        in_fault_reference = parameters[1].valueAsText
+        transect_interval = parameters[2].value
+        transect_length_manual = parameters[3].value # Może być None
+        out_measurement_lines = parameters[4].valueAsText
+        out_statistics_table = parameters[5].valueAsText
+
+        arcpy.env.overwriteOutput = True
+        
+        try:
+            messages.AddMessage("Rozpoczynanie analizy błędu kierunku...")
+
+            # --- KROK 1: Przygotowanie i Walidacja Wstępna ---
+            messages.AddMessage("Krok 1: Walidacja danych wejściowych...")
+            
+            # Sprawdzenie zgodności układów współrzędnych
+            desc_user = arcpy.Describe(in_fault_user)
+            desc_ref = arcpy.Describe(in_fault_reference)
+            if desc_user.spatialReference.name != desc_ref.spatialReference.name:
+                raise Exception("Układy współrzędnych obu warstw uskoków muszą być identyczne!")
+            spatial_ref = desc_user.spatialReference
+
+            # Pobranie geometrii uskoków (zakładamy, że są to pojedyncze linie)
+            with arcpy.da.SearchCursor(in_fault_user, ["SHAPE@"]) as cursor:
+                fault_user_geom = next(cursor)[0]
+            with arcpy.da.SearchCursor(in_fault_reference, ["SHAPE@"]) as cursor:
+                fault_ref_geom = next(cursor)[0]
+
+            # --- KROK 2: Przygotowanie Linii Bazowej dla Tranzytów ---
+            messages.AddMessage("Krok 2: Przygotowanie linii bazowej do generowania pomiarów...")
+
+            # Obliczenie wspólnej otoczki obu uskoków
+            env_user = fault_user_geom.extent
+            env_ref = fault_ref_geom.extent
+            common_extent = arcpy.Extent(
+                min(env_user.XMin, env_ref.XMin), min(env_user.YMin, env_ref.YMin),
+                max(env_user.XMax, env_ref.XMax), max(env_user.YMax, env_ref.YMax)
+            )
+
+            # Określenie długości tranzytów (automatycznie lub manualnie)
+            if transect_length_manual is None:
+                transect_length = max(common_extent.width, common_extent.height) * 1.2
+                messages.AddMessage(f"Automatycznie obliczona długość linii pomiarowych: {int(transect_length)} m")
+            else:
+                transect_length = transect_length_manual
+                messages.AddMessage(f"Użyto ręcznie zdefiniowanej długości linii pomiarowych: {int(transect_length)} m")
+
+                        # Obliczenie azymutu biegu (line bearing) na tymczasowej kopii
+            temp_fault_user = "in_memory/temp_fault_user_for_bearing"
+            arcpy.management.CopyFeatures(in_fault_user, temp_fault_user)
+            
+            # 1. NAJPIERW dodaj puste pole
+            arcpy.management.AddField(temp_fault_user, "line_bearing", "DOUBLE")
+            
+            # 2. DOPIERO TERAZ wypełnij je wartościami
+            arcpy.management.CalculateGeometryAttributes(
+                in_features=temp_fault_user,
+                geometry_property=[["line_bearing", "LINE_BEARING"]],
+                coordinate_system=spatial_ref
+            )
+            with arcpy.da.SearchCursor(temp_fault_user, ["line_bearing"]) as cursor:
+                row = next(cursor, None)
+                if row is None or row[0] is None:
+                    raise Exception("Nie udało się obliczyć azymutu (line bearing) dla uskoku użytkownika.")
+                line_bearing_deg = row[0]
+
+            # # Obliczenie azymutu biegu (line bearing) uskoku użytkownika
+            # temp_bearing_table = "in_memory/bearing_table"
+            # arcpy.management.CalculateGeometryAttributes(in_fault_user, [["line_bearing", "LINE_BEARING"]], "", "", spatial_ref)
+            # with arcpy.da.SearchCursor(in_fault_user, ["line_bearing"]) as cursor:
+            #     line_bearing_deg = next(cursor)[0]
+            
+            # Stworzenie "wirtualnej" linii bazowej w pamięci Pythona
+            center_x, center_y = common_extent.XMin + common_extent.width / 2, common_extent.YMin + common_extent.height / 2
+            bearing_rad = math.radians(line_bearing_deg)
+            baseline_len = math.sqrt(common_extent.width**2 + common_extent.height**2) * 1.2
+            messages.AddMessage(f"Automatycznie obliczona długość linii bazowej: {int(baseline_len)} m")
+            start_x = center_x - (baseline_len / 2) * math.sin(bearing_rad)
+            start_y = center_y - (baseline_len / 2) * math.cos(bearing_rad)
+            end_x = center_x + (baseline_len / 2) * math.sin(bearing_rad)
+            end_y = center_y + (baseline_len / 2) * math.cos(bearing_rad)
+            
+            baseline_geom = arcpy.Polyline(arcpy.Array([arcpy.Point(start_x, start_y), arcpy.Point(end_x, end_y)]), spatial_ref)
+            
+            # --- KROK 3: Generowanie Surowych Tranzytów ---
+            messages.AddMessage("Krok 3: Generowanie prostopadłych linii pomiarowych (tranzytów)...")
+            raw_transects = "in_memory/raw_transects"
+            arcpy.management.GenerateTransectsAlongLines(
+                baseline_geom,
+                raw_transects,
+                f"{transect_interval} Meters",
+                f"{transect_length} Meters"
+            )
+
+            # --- KROK 4: Przecięcie, Filtracja i Tworzenie Linii Pomiarowych ---
+            messages.AddMessage("Krok 4: Filtrowanie i tworzenie finalnych linii pomiaru...")
+            valid_transect_geometries = []
+            
+            with arcpy.da.SearchCursor(raw_transects, ["SHAPE@"]) as cursor:
+                for row in cursor:
+                    transect_geom = row[0]
+                    # Znajdź punkty przecięcia z obiema liniami uskoków
+                    intersections_user = transect_geom.intersect(fault_user_geom, 1) # 1 = punkty
+                    intersections_ref = transect_geom.intersect(fault_ref_geom, 1)
+
+                    # Warunek filtra: muszą istnieć przecięcia z OBIEMA liniami
+                    if intersections_user.pointCount > 0 and intersections_ref.pointCount > 0:
+                        # Znajdź najbliższą parę punktów (jeden z uskoku usera, drugi z referencyjnego)
+                        min_dist = float('inf')
+                        best_pair = (None, None)
+                        for p_user in intersections_user:
+                            for p_ref in intersections_ref:
+                                dist = math.sqrt((p_user.X - p_ref.X)**2 + (p_user.Y - p_ref.Y)**2)
+                                if dist < min_dist:
+                                    min_dist = dist
+                                    best_pair = (p_user, p_ref)
+                        
+                        # Stwórz nową, krótką linię pomiędzy najlepszą parą punktów
+                        if best_pair[0]:
+                            final_line = arcpy.Polyline(arcpy.Array([best_pair[0], best_pair[1]]), spatial_ref)
+                            valid_transect_geometries.append(final_line)
+            
+            arcpy.management.Delete(raw_transects)
+            if not valid_transect_geometries:
+                raise Exception("Nie udało się wygenerować żadnych linii pomiarowych. Sprawdź, czy uskoki się przecinają lub czy interwał nie jest zbyt duży.")
+
+            # --- KROK 5: Zapisanie Wyników Geometrycznych ---
+            messages.AddMessage(f"Krok 5: Zapisywanie {len(valid_transect_geometries)} linii pomiarowych...")
+            arcpy.management.CreateFeatureclass(os.path.dirname(out_measurement_lines), os.path.basename(out_measurement_lines), "POLYLINE", spatial_reference=spatial_ref)
+            with arcpy.da.InsertCursor(out_measurement_lines, ["SHAPE@"]) as cursor:
+                for geom in valid_transect_geometries:
+                    cursor.insertRow([geom])
+
+            # --- KROK 6: Obliczenia Statystyczne ---
+            messages.AddMessage("Krok 6: Obliczanie statystyk błędu...")
+            lengths = [row[0] for row in arcpy.da.SearchCursor(out_measurement_lines, ["SHAPE@LENGTH"])]
+            L = fault_user_geom.length
+
+            min_val, max_val = min(lengths), max(lengths)
+            mean_val = sum(lengths) / len(lengths)
+            std_val = np.std(lengths) # Używamy NumPy do odchylenia standardowego
+
+            # Wzór na błąd E
+            error_E = ((max_val - min_val) * std_val * 90) / (mean_val * L)
+            messages.AddMessage(f"Obliczono błąd odchyłki (E): {error_E:.4f} stopni")
+
+            # --- KROK 7: Zapisanie Wyników Statystycznych ---
+            messages.AddMessage("Krok 7: Zapisywanie statystyk do tabeli...")
+            arcpy.management.CreateTable(os.path.dirname(out_statistics_table), os.path.basename(out_statistics_table))
+            fields_to_add = [
+                ["Blad_E_stopnie", "DOUBLE"], ["Min_odchylka_m", "DOUBLE"], ["Max_odchylka_m", "DOUBLE"],
+                ["Srednia_odchylka_m", "DOUBLE"], ["Odch_stand_m", "DOUBLE"], ["Dlugosc_uskoku_L_m", "DOUBLE"]
+            ]
+            for field_name, field_type in fields_to_add:
+                arcpy.management.AddField(out_statistics_table, field_name, field_type)
+
+            with arcpy.da.InsertCursor(out_statistics_table, [f[0] for f in fields_to_add]) as cursor:
+                cursor.insertRow([error_E, min_val, max_val, mean_val, std_val, L])
+
+            messages.AddMessage("\nZakończono pomyślnie!")
+
+        except Exception as e:
+            import traceback
+            error_msg = str(e)
+            messages.AddError(f"Wystąpił błąd: {error_msg}")
+            tb_lines = traceback.format_exc().split('\n')
+            for line in tb_lines:
+                if line.strip(): messages.AddMessage(f"  {line}")
+            raise
 
         return
