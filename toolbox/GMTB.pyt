@@ -534,7 +534,16 @@ class ObliczMiazszosc:
             direction = "Output"
         )
 
-        return [param0, param1, param2, param3, param4, param5, param6, param7]
+        #Parametr 1: raster NMT
+        param8 = arcpy.Parameter(
+            displayName = "Numeryczny Model Terenu (NMT)",
+            name = "input_nmt_raster",
+            datatype = "GPRasterLayer",
+            parameterType = "Required",
+            direction = "Input"
+        )
+
+        return [param0, param1, param2, param3, param4, param5, param6, param7, param8]
 
     def updateParameters(self, parameters):
         # Pokaż/ukryj parametr punktu w zależności od wybranej metody
@@ -589,6 +598,7 @@ class ObliczMiazszosc:
 
         return
     
+    
     def updateMessages(self, parameters):
         #Walidacja wartości kąta zapadania
         if parameters[5].value is not None:
@@ -605,6 +615,7 @@ class ObliczMiazszosc:
         dip_angle_manual = parameters[5].value
         dip_field_name = parameters[6].valueAsText
         out_line = parameters[7].valueAsText
+        input_nmt = parameters[8].valueAsText
 
         arcpy.env.overwriteOutput = True
 
@@ -779,19 +790,57 @@ class ObliczMiazszosc:
 
             # CZĘŚĆ 2: Obliczenia i tworzenie wyniku (wspólne dla wszystkich metod)
             if apparent_thickness is None:
-                raise Exception("Nie udało się wyznaczyć miąższości pozornej. Sprawdź parametry.")
+                raise Exception("Nie udało się wyznaczyć miąższości pozornej.")
 
-            messages.AddMessage("Obliczanie miąższości rzeczywistej...")
-            dip_rad = math.radians(dip_angle)
-            true_thickness = apparent_thickness * math.sin(dip_rad)
-            messages.AddMessage(f"OBLICZONO MIĄŻSZOŚĆ RZECZYWISTĄ: {true_thickness:.2f} m")
+            ### POCZĄTEK NOWEJ LOGIKI 3D ###
+            messages.AddMessage("Obliczanie miąższości rzeczywistej metodą wektorową 3D...")
+
+            # współrzędne Z dla obu punktów z NMT
+            (x1, y1), (x2, y2) = start_point_coords, end_point_coords
+
+            temp_2_points = "in_memory/temp_2_points_for_z"
+            arcpy.management.CreateFeatureclass("in_memory", "temp_2_points_for_z", "POINT", spatial_reference=spatial_ref)
+            with arcpy.da.InsertCursor(temp_2_points, ["SHAPE@XY"]) as cursor:
+                cursor.insertRow([(x1, y1)])
+                cursor.insertRow([(x2, y2)])
+            
+            points_with_z = "in_memory/points_with_z_result"
+            arcpy.sa.ExtractValuesToPoints(temp_2_points, input_nmt, points_with_z, "NONE", "VALUE_ONLY")
+            
+            # Odczytaj wartości Z
+            z_values = [row[0] for row in arcpy.da.SearchCursor(points_with_z, ["RASTERVALU"])]
+            arcpy.management.Delete(temp_2_points); arcpy.management.Delete(points_with_z)
+
+            if len(z_values) < 2 or z_values[0] is None or z_values[1] is None:
+                 raise Exception("Nie udało się odczytać wysokości Z z NMT dla jednego z punktów pomiaru. Punkt prawdopodobnie leży poza zasięgiem rastra.")
+            
+            z1, z2 = z_values[0], z_values[1]
+            
+            # Odczyt kierunku upadu (Dir) z atrybutów Linii 1
+            dir_angle = None
+            if 'dir' in [f.name.lower() for f in arcpy.ListFields(in_line_1)]:
+                with arcpy.da.SearchCursor(in_line_1, ["Dir"]) as cursor:
+                    row = next(cursor, None)
+                    if row and row[0] is not None: dir_angle = float(row[0])
+            if dir_angle is None:
+                raise Exception("Nie można odczytać wartości kierunku upadu (Dir) z atrybutów 'Linii 1'.")
+            
+            # Obliczenia wektorowe
+            dip_rad, dir_rad = math.radians(dip_angle), math.radians(dir_angle)
+            nx, ny, nz = math.sin(dip_rad) * math.sin(dir_rad), math.sin(dip_rad) * math.cos(dir_rad), math.cos(dip_rad)
+            vx, vy, vz = x2 - x1, y2 - y1, z2 - z1
+            dot_product = (vx * nx) + (vy * ny) + (vz * nz)
+            true_thickness = abs(dot_product)
+            
+            messages.AddMessage(f"Miąższość rzeczywista (obliczona w 3D): {true_thickness:.2f} m")
 
             messages.AddMessage("Tworzenie warstwy wynikowej...")
             arcpy.management.CreateFeatureclass(os.path.dirname(out_line), os.path.basename(out_line), "POLYLINE", spatial_reference=spatial_ref)
             arcpy.management.AddField(out_line, "Miazszosc_Pozorna", "DOUBLE")
-            arcpy.management.AddField(out_line, "Miazszosc_Rzeczywista", "DOUBLE")
+            #
+            arcpy.management.AddField(out_line, "Miazszosc_Rzeczywista_3D", "DOUBLE")
 
-            with arcpy.da.InsertCursor(out_line, ["SHAPE@", "Miazszosc_Pozorna", "Miazszosc_Rzeczywista"]) as cursor:
+            with arcpy.da.InsertCursor(out_line, ["SHAPE@", "Miazszosc_Pozorna", "Miazszosc_Rzeczywista_3D"]) as cursor:
                 start_p = arcpy.Point(*start_point_coords)
                 end_p = arcpy.Point(*end_point_coords)
                 line_geometry = arcpy.Polyline(arcpy.Array([start_p, end_p]), spatial_ref)
@@ -802,6 +851,6 @@ class ObliczMiazszosc:
 
         except Exception as e:
             messages.AddError(f"Wystąpił błąd: {e}")
-            raise # Rzuć błąd, aby narzędzie zakończyło się jako "nieudane"
+            raise
 
         return
