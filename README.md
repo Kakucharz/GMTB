@@ -5,7 +5,7 @@
 **Version:** 1.1.0
 
 A Python Toolbox for the ArcGIS Pro environment, designed to automate key tasks in the field of digital geological mapping. 
-The project was developed as part of a thesis at the Faculty of Geology, Geophysics, and Environmental Protection at the Stanisław Staszic University of Science and Technology in Kraków.
+The project was developed as part of a thesis at the Faculty of Geology, Geophysics, and Environmental Protection at the AGH University of Krakow.
 
 ## Description
 
